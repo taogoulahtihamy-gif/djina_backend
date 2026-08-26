@@ -1,9 +1,11 @@
-from django.db import transaction
+from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
+from django.db import transaction
+
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.tokens import RefreshToken
-from django.contrib.auth import get_user_model
+
 from .models import (
     AdminProfile,
     Customer,
@@ -19,47 +21,64 @@ from .models import (
     Tariff,
     Notification,
 )
+
 from .pricing import haversine_distance_km
+
 
 User = get_user_model()
 
 
-# ---------------------------
-# ACTION REQUEST SERIALIZERS (Swagger friendly)
-# ---------------------------
+# =====================================================
+# ACTION REQUEST SERIALIZERS
+# =====================================================
+
 class CourseAcceptSerializer(serializers.Serializer):
-    vehicle_id = serializers.IntegerField(required=False)
+    vehicle_id = serializers.IntegerField(
+        required=False
+    )
 
 
 class CourseCompleteSerializer(serializers.Serializer):
-    final_price = serializers.DecimalField(max_digits=10, decimal_places=2)
+    final_price = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+    )
 
 
 class CourseCancelSerializer(serializers.Serializer):
-    reason = serializers.CharField(required=False, allow_blank=True)
+    reason = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )
 
 
 class DriverDocumentRejectSerializer(serializers.Serializer):
-    rejection_reason = serializers.CharField(required=True)
+    rejection_reason = serializers.CharField(
+        required=True
+    )
 
 
 class PaymentMarkPaidSerializer(serializers.Serializer):
-    # si tu veux enrichir ensuite (transaction_id, provider, etc.)
     pass
 
 
 class ComplaintResolveSerializer(serializers.Serializer):
-    resolution_note = serializers.CharField(required=False, allow_blank=True)
+    resolution_note = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )
 
 
-# ---------------------------
-# User
-# ---------------------------
+# =====================================================
+# USER
+# =====================================================
+
 class UserSerializer(serializers.ModelSerializer):
     is_online = serializers.SerializerMethodField()
 
     class Meta:
         model = User
+
         fields = (
             "id",
             "email",
@@ -75,7 +94,15 @@ class UserSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "is_active", "is_staff", "is_superuser", "created_at", "updated_at")
+
+        read_only_fields = (
+            "id",
+            "is_active",
+            "is_staff",
+            "is_superuser",
+            "created_at",
+            "updated_at",
+        )
 
     def get_is_online(self, obj):
         try:
@@ -84,6 +111,56 @@ class UserSerializer(serializers.ModelSerializer):
             return None
 
 
+class UserListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+
+        fields = (
+            "id",
+            "email",
+            "phone",
+            "first_name",
+            "last_name",
+            "user_type",
+            "is_active",
+            "created_at",
+        )
+
+
+# =====================================================
+# AUTHENTICATION
+# =====================================================
+
+class EmailTokenObtainPairSerializer(
+    TokenObtainPairSerializer
+):
+    username_field = "email"
+
+    def validate(self, attrs):
+        data = super().validate(attrs)
+
+        refresh = RefreshToken(
+            data["refresh"]
+        )
+
+        session_id = str(
+            refresh["jti"]
+        )
+
+        refresh["sid"] = session_id
+
+        access = refresh.access_token
+        access["sid"] = session_id
+
+        data["refresh"] = str(
+            refresh
+        )
+
+        data["access"] = str(
+            access
+        )
+
+        return data
 
 
 class UpdateProfileSerializer(serializers.ModelSerializer):
@@ -92,11 +169,13 @@ class UpdateProfileSerializer(serializers.ModelSerializer):
         required=True,
         allow_blank=False,
     )
+
     last_name = serializers.CharField(
         max_length=150,
         required=True,
         allow_blank=False,
     )
+
     phone = serializers.CharField(
         max_length=20,
         required=True,
@@ -105,6 +184,7 @@ class UpdateProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
+
         fields = (
             "first_name",
             "last_name",
@@ -139,10 +219,16 @@ class UpdateProfileSerializer(serializers.ModelSerializer):
                 "Le numéro de téléphone est obligatoire."
             )
 
-        queryset = User.objects.filter(phone=value)
+        user = self.instance
 
-        if self.instance is not None:
-            queryset = queryset.exclude(pk=self.instance.pk)
+        queryset = User.objects.filter(
+            phone=value
+        )
+
+        if user:
+            queryset = queryset.exclude(
+                pk=user.pk
+            )
 
         if queryset.exists():
             raise serializers.ValidationError(
@@ -151,197 +237,426 @@ class UpdateProfileSerializer(serializers.ModelSerializer):
 
         return value
 
-class RegisterCustomerSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-    phone = serializers.CharField(max_length=20)
-    password = serializers.CharField(write_only=True, min_length=6)
-
-    first_name = serializers.CharField(required=False, allow_blank=True)
-    last_name = serializers.CharField(required=False, allow_blank=True)
-
-    referral_code = serializers.CharField(required=False, allow_blank=True)
-
-    def validate_referral_code(self, value):
-        if value:
-            if not Referral.objects.filter(code=value, deleted_at__isnull=True).exists():
-                raise serializers.ValidationError("Invalid referral code.")
-        return value
-
-    @transaction.atomic
-    def create(self, validated_data):
-        referral_code = validated_data.pop("referral_code", "")
-        password = validated_data.pop("password")
-
-        user = User.objects.create_user(
-            email=validated_data["email"],
-            phone=validated_data["phone"],
-            password=password,
-            first_name=validated_data.get("first_name", ""),
-            last_name=validated_data.get("last_name", ""),
-            user_type=User.UserType.CUSTOMER,
-            is_active=True,
-        )
-        customer = Customer.objects.create(user=user)
-
-        # Génération simple de code (tu peux remplacer par un générateur random)
-        code = f"CUST-{user.id}"
-
-        sponsor_user = None
-        if referral_code:
-            sponsor_user = Referral.objects.get(code=referral_code, deleted_at__isnull=True).owner_user
-
-        Referral.objects.create(code=code, owner_user=user, sponsor_user=sponsor_user)
-        return customer
-
-
-class RegisterDriverSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-    phone = serializers.CharField(max_length=20)
-    password = serializers.CharField(write_only=True, min_length=6)
-
-    first_name = serializers.CharField(required=False, allow_blank=True)
-    last_name = serializers.CharField(required=False, allow_blank=True)
-
-    referral_code = serializers.CharField(required=False, allow_blank=True)
-
-    def validate_referral_code(self, value):
-        if value:
-            if not Referral.objects.filter(code=value, deleted_at__isnull=True).exists():
-                raise serializers.ValidationError("Invalid referral code.")
-        return value
-
-    @transaction.atomic
-    def create(self, validated_data):
-        referral_code = validated_data.pop("referral_code", "")
-        password = validated_data.pop("password")
-
-        user = User.objects.create_user(
-            email=validated_data["email"],
-            phone=validated_data["phone"],
-            password=password,
-            first_name=validated_data.get("first_name", ""),
-            last_name=validated_data.get("last_name", ""),
-            user_type=User.UserType.DRIVER,
-            is_active=True,
-        )
-        driver = Driver.objects.create(user=user)
-
-        code = f"DRV-{user.id}"
-
-        sponsor_user = None
-        if referral_code:
-            sponsor_user = Referral.objects.get(code=referral_code, deleted_at__isnull=True).owner_user
-
-        Referral.objects.create(code=code, owner_user=user, sponsor_user=sponsor_user)
-        return driver
-
-
-class AdminCreateSerializer(serializers.Serializer):
-    first_name = serializers.CharField(max_length=150)
-    last_name = serializers.CharField(max_length=150)
-    email = serializers.EmailField()
-    phone = serializers.CharField(max_length=20)
-    password = serializers.CharField(write_only=True, trim_whitespace=False)
-    admin_type = serializers.ChoiceField(choices=AdminProfile.AdminType.choices)
-
-    def validate_email(self, value):
-        value = User.objects.normalize_email(value).strip()
-        if User.objects.filter(email__iexact=value).exists():
-            raise serializers.ValidationError("Un utilisateur avec cette adresse e-mail existe déjà.")
-        return value
-
-    def validate_phone(self, value):
-        value = value.strip()
-        if not value:
-            raise serializers.ValidationError("Ce champ est obligatoire.")
-        if User.objects.filter(phone=value).exists():
-            raise serializers.ValidationError("Un utilisateur avec ce numéro de téléphone existe déjà.")
-        return value
-
-    def validate(self, attrs):
-        candidate = User(
-            email=attrs["email"],
-            phone=attrs["phone"],
-            first_name=attrs["first_name"],
-            last_name=attrs["last_name"],
-        )
-        validate_password(attrs["password"], user=candidate)
-        return attrs
-
-    @transaction.atomic
-    def create(self, validated_data):
-        admin_type = validated_data.pop("admin_type")
-        password = validated_data.pop("password")
-        user = User.objects.create_user(
-            **validated_data,
-            password=password,
-            user_type=User.UserType.ADMIN,
-            is_staff=True,
-            is_active=True,
-            is_superuser=admin_type == AdminProfile.AdminType.SUPER,
-        )
-        AdminProfile.objects.create(user=user, type_of=admin_type)
-        return user
-
-
 
 class ChangePasswordSerializer(serializers.Serializer):
     current_password = serializers.CharField(
         write_only=True,
         trim_whitespace=False,
     )
+
     new_password = serializers.CharField(
         write_only=True,
         trim_whitespace=False,
     )
 
     def validate_current_password(self, value):
-        user = self.context["request"].user
+        user = self.context[
+            "request"
+        ].user
+
         if not user.check_password(value):
             raise serializers.ValidationError(
                 "Le mot de passe actuel est incorrect."
             )
+
         return value
 
     def validate_new_password(self, value):
-        user = self.context["request"].user
-        validate_password(value, user=user)
+        user = self.context[
+            "request"
+        ].user
+
+        validate_password(
+            value,
+            user=user,
+        )
+
         return value
 
     def validate(self, attrs):
-        if attrs["current_password"] == attrs["new_password"]:
-            raise serializers.ValidationError({
-                "new_password": (
-                    "Le nouveau mot de passe doit être différent "
-                    "du mot de passe actuel."
-                )
-            })
+        if (
+            attrs["current_password"]
+            == attrs["new_password"]
+        ):
+            raise serializers.ValidationError(
+                {
+                    "new_password": (
+                        "Le nouveau mot de passe doit être "
+                        "différent du mot de passe actuel."
+                    )
+                }
+            )
+
         return attrs
 
     def save(self, **kwargs):
-        user = self.context["request"].user
-        user.set_password(self.validated_data["new_password"])
-        user.save(update_fields=["password"])
+        user = self.context[
+            "request"
+        ].user
+
+        user.set_password(
+            self.validated_data[
+                "new_password"
+            ]
+        )
+
+        user.save(
+            update_fields=[
+                "password"
+            ]
+        )
+
         return user
 
 
-# ---------------------------
-# Profiles
-# ---------------------------
+# =====================================================
+# REGISTRATION
+# =====================================================
+
+class RegisterCustomerSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    phone = serializers.CharField(
+        max_length=20
+    )
+
+    password = serializers.CharField(
+        write_only=True,
+        min_length=6,
+    )
+
+    first_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )
+
+    last_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )
+
+    referral_code = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )
+
+    def validate_referral_code(self, value):
+        if value:
+            exists = Referral.objects.filter(
+                code=value,
+                deleted_at__isnull=True,
+            ).exists()
+
+            if not exists:
+                raise serializers.ValidationError(
+                    "Invalid referral code."
+                )
+
+        return value
+
+    @transaction.atomic
+    def create(self, validated_data):
+        referral_code = validated_data.pop(
+            "referral_code",
+            "",
+        )
+
+        password = validated_data.pop(
+            "password"
+        )
+
+        user = User.objects.create_user(
+            email=validated_data[
+                "email"
+            ],
+            phone=validated_data[
+                "phone"
+            ],
+            password=password,
+            first_name=validated_data.get(
+                "first_name",
+                "",
+            ),
+            last_name=validated_data.get(
+                "last_name",
+                "",
+            ),
+            user_type=User.UserType.CUSTOMER,
+            is_active=True,
+        )
+
+        customer = Customer.objects.create(
+            user=user
+        )
+
+        code = f"CUST-{user.id}"
+
+        sponsor_user = None
+
+        if referral_code:
+            sponsor_user = (
+                Referral.objects.get(
+                    code=referral_code,
+                    deleted_at__isnull=True,
+                ).owner_user
+            )
+
+        Referral.objects.create(
+            code=code,
+            owner_user=user,
+            sponsor_user=sponsor_user,
+        )
+
+        return customer
+
+
+class RegisterDriverSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    phone = serializers.CharField(
+        max_length=20
+    )
+
+    password = serializers.CharField(
+        write_only=True,
+        min_length=6,
+    )
+
+    first_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )
+
+    last_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )
+
+    referral_code = serializers.CharField(
+        required=False,
+        allow_blank=True,
+    )
+
+    def validate_referral_code(self, value):
+        if value:
+            exists = Referral.objects.filter(
+                code=value,
+                deleted_at__isnull=True,
+            ).exists()
+
+            if not exists:
+                raise serializers.ValidationError(
+                    "Invalid referral code."
+                )
+
+        return value
+
+    @transaction.atomic
+    def create(self, validated_data):
+        referral_code = validated_data.pop(
+            "referral_code",
+            "",
+        )
+
+        password = validated_data.pop(
+            "password"
+        )
+
+        user = User.objects.create_user(
+            email=validated_data[
+                "email"
+            ],
+            phone=validated_data[
+                "phone"
+            ],
+            password=password,
+            first_name=validated_data.get(
+                "first_name",
+                "",
+            ),
+            last_name=validated_data.get(
+                "last_name",
+                "",
+            ),
+            user_type=User.UserType.DRIVER,
+            is_active=True,
+        )
+
+        driver = Driver.objects.create(
+            user=user
+        )
+
+        code = f"DRV-{user.id}"
+
+        sponsor_user = None
+
+        if referral_code:
+            sponsor_user = (
+                Referral.objects.get(
+                    code=referral_code,
+                    deleted_at__isnull=True,
+                ).owner_user
+            )
+
+        Referral.objects.create(
+            code=code,
+            owner_user=user,
+            sponsor_user=sponsor_user,
+        )
+
+        return driver
+
+
+# =====================================================
+# ADMIN CREATION
+# =====================================================
+
+class AdminCreateSerializer(serializers.Serializer):
+    first_name = serializers.CharField(
+        max_length=150
+    )
+
+    last_name = serializers.CharField(
+        max_length=150
+    )
+
+    email = serializers.EmailField()
+
+    phone = serializers.CharField(
+        max_length=20
+    )
+
+    password = serializers.CharField(
+        write_only=True,
+        trim_whitespace=False,
+    )
+
+    admin_type = serializers.ChoiceField(
+        choices=AdminProfile.AdminType.choices
+    )
+
+    def validate_email(self, value):
+        value = (
+            User.objects
+            .normalize_email(value)
+            .strip()
+        )
+
+        if User.objects.filter(
+            email__iexact=value
+        ).exists():
+            raise serializers.ValidationError(
+                "Un utilisateur avec cette adresse "
+                "e-mail existe déjà."
+            )
+
+        return value
+
+    def validate_phone(self, value):
+        value = value.strip()
+
+        if not value:
+            raise serializers.ValidationError(
+                "Ce champ est obligatoire."
+            )
+
+        if User.objects.filter(
+            phone=value
+        ).exists():
+            raise serializers.ValidationError(
+                "Un utilisateur avec ce numéro "
+                "de téléphone existe déjà."
+            )
+
+        return value
+
+    def validate(self, attrs):
+        candidate = User(
+            email=attrs[
+                "email"
+            ],
+            phone=attrs[
+                "phone"
+            ],
+            first_name=attrs[
+                "first_name"
+            ],
+            last_name=attrs[
+                "last_name"
+            ],
+        )
+
+        validate_password(
+            attrs["password"],
+            user=candidate,
+        )
+
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        admin_type = validated_data.pop(
+            "admin_type"
+        )
+
+        password = validated_data.pop(
+            "password"
+        )
+
+        user = User.objects.create_user(
+            **validated_data,
+            password=password,
+            user_type=User.UserType.ADMIN,
+            is_staff=True,
+            is_active=True,
+            is_superuser=(
+                admin_type
+                == AdminProfile.AdminType.SUPER
+            ),
+        )
+
+        AdminProfile.objects.create(
+            user=user,
+            type_of=admin_type,
+        )
+
+        return user
+
+
+# =====================================================
+# PROFILES
+# =====================================================
+
 class CustomerSerializer(serializers.ModelSerializer):
-    user = UserSerializer(read_only=True)
+    user = UserSerializer(
+        read_only=True
+    )
 
     class Meta:
         model = Customer
-        fields = ("id", "user", "created_at", "updated_at")
-        read_only_fields = ("id", "created_at", "updated_at")
+
+        fields = (
+            "id",
+            "user",
+            "created_at",
+            "updated_at",
+        )
+
+        read_only_fields = (
+            "id",
+            "created_at",
+            "updated_at",
+        )
 
 
 class DriverSerializer(serializers.ModelSerializer):
-    user = UserSerializer(read_only=True)
+    user = UserSerializer(
+        read_only=True
+    )
 
     class Meta:
         model = Driver
+
         fields = (
             "id",
             "user",
@@ -352,23 +667,37 @@ class DriverSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "rating_avg", "rating_count", "created_at", "updated_at")
+
+        read_only_fields = (
+            "id",
+            "rating_avg",
+            "rating_count",
+            "created_at",
+            "updated_at",
+        )
 
 
-# ---------------------------
-# Vehicle
-# ---------------------------
+# =====================================================
+# VEHICLE
+# =====================================================
+
 class VehicleSerializer(serializers.ModelSerializer):
     driver_id = serializers.PrimaryKeyRelatedField(
         source="driver",
-        queryset=Driver.objects.filter(deleted_at__isnull=True),
+        queryset=Driver.objects.filter(
+            deleted_at__isnull=True
+        ),
         required=False,
         write_only=True,
     )
-    driver = DriverSerializer(read_only=True)
+
+    driver = DriverSerializer(
+        read_only=True
+    )
 
     class Meta:
         model = Vehicle
+
         fields = (
             "id",
             "driver",
@@ -382,15 +711,22 @@ class VehicleSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "created_at", "updated_at")
+
+        read_only_fields = (
+            "id",
+            "created_at",
+            "updated_at",
+        )
 
 
-# ---------------------------
-# Driver Document
-# ---------------------------
+# =====================================================
+# DRIVER DOCUMENT
+# =====================================================
+
 class DriverDocumentSerializer(serializers.ModelSerializer):
     class Meta:
         model = DriverDocument
+
         fields = (
             "id",
             "driver",
@@ -403,6 +739,7 @@ class DriverDocumentSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
+
         read_only_fields = (
             "id",
             "driver",
@@ -415,16 +752,26 @@ class DriverDocumentSerializer(serializers.ModelSerializer):
         )
 
 
-# ---------------------------
-# Course
-# ---------------------------
+# =====================================================
+# COURSE
+# =====================================================
+
 class CourseSerializer(serializers.ModelSerializer):
-    customer = CustomerSerializer(read_only=True)
-    driver = DriverSerializer(read_only=True)
-    vehicle = VehicleSerializer(read_only=True)
+    customer = CustomerSerializer(
+        read_only=True
+    )
+
+    driver = DriverSerializer(
+        read_only=True
+    )
+
+    vehicle = VehicleSerializer(
+        read_only=True
+    )
 
     class Meta:
         model = Course
+
         fields = (
             "id",
             "customer",
@@ -452,19 +799,16 @@ class CourseSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
+
         read_only_fields = fields
 
 
-class CourseCreateByCustomerSerializer(serializers.ModelSerializer):
-    """
-    Création de course par client connecté :
-    - customer dérivé de request.user
-    - status default = requested (model)
-    - distance et prix calculés côté serveur à partir du tarif configuré pour
-      requested_service_tier (le client ne peut pas fixer initial_price).
-    """
+class CourseCreateByCustomerSerializer(
+    serializers.ModelSerializer
+):
     class Meta:
         model = Course
+
         fields = (
             "departure_latitude",
             "departure_longitude",
@@ -475,40 +819,72 @@ class CourseCreateByCustomerSerializer(serializers.ModelSerializer):
             "requested_service_tier",
         )
 
-    def validate_requested_service_tier(self, value):
-        if not Tariff.objects.filter(service_tier=value, is_active=True, deleted_at__isnull=True).exists():
-            raise serializers.ValidationError("No active tariff configured for this service tier.")
+    def validate_requested_service_tier(
+        self,
+        value,
+    ):
+        exists = Tariff.objects.filter(
+            service_tier=value,
+            is_active=True,
+            deleted_at__isnull=True,
+        ).exists()
+
+        if not exists:
+            raise serializers.ValidationError(
+                "No active tariff configured "
+                "for this service tier."
+            )
+
         return value
 
     def create(self, validated_data):
-        customer = self.context["customer"]
+        customer = self.context[
+            "customer"
+        ]
 
         tariff = Tariff.objects.get(
-            service_tier=validated_data["requested_service_tier"],
+            service_tier=validated_data[
+                "requested_service_tier"
+            ],
             is_active=True,
             deleted_at__isnull=True,
         )
+
         distance_km = haversine_distance_km(
-            validated_data["departure_latitude"],
-            validated_data["departure_longitude"],
-            validated_data["destination_latitude"],
-            validated_data["destination_longitude"],
+            validated_data[
+                "departure_latitude"
+            ],
+            validated_data[
+                "departure_longitude"
+            ],
+            validated_data[
+                "destination_latitude"
+            ],
+            validated_data[
+                "destination_longitude"
+            ],
         )
 
         return Course.objects.create(
             customer=customer,
             distance_km=distance_km,
-            initial_price=tariff.price_for_distance(distance_km),
+            initial_price=(
+                tariff.price_for_distance(
+                    distance_km
+                )
+            ),
             **validated_data,
         )
 
 
-# ---------------------------
-# Payment / Evaluation / Complaint
-# ---------------------------
+# =====================================================
+# PAYMENT
+# =====================================================
+
 class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
+
         fields = (
             "id",
             "course",
@@ -523,12 +899,25 @@ class PaymentSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "status", "paid_at", "failure_reason", "created_at", "updated_at")
 
+        read_only_fields = (
+            "id",
+            "status",
+            "paid_at",
+            "failure_reason",
+            "created_at",
+            "updated_at",
+        )
+
+
+# =====================================================
+# EVALUATION
+# =====================================================
 
 class EvaluationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Evaluation
+
         fields = (
             "id",
             "course",
@@ -539,14 +928,52 @@ class EvaluationSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
-        # customer/driver sont dérivés de la course par la vue (perform_create),
-        # pas fournis par le client — cf. EvaluationViewSet.perform_create.
-        read_only_fields = ("id", "customer", "driver", "created_at", "updated_at")
+
+        read_only_fields = (
+            "id",
+            "customer",
+            "driver",
+            "created_at",
+            "updated_at",
+        )
+
+
+# =====================================================
+# COMPLAINT
+# =====================================================
+
+class ComplaintResolverSerializer(
+    serializers.ModelSerializer
+):
+    """
+    Informations publiques minimales sur
+    l'administrateur ayant traité la réclamation.
+    """
+
+    class Meta:
+        model = User
+
+        fields = (
+            "id",
+            "first_name",
+            "last_name",
+            "user_type",
+            "is_staff",
+            "is_superuser",
+        )
+
+        read_only_fields = fields
 
 
 class ComplaintSerializer(serializers.ModelSerializer):
+    resolved_by_user = ComplaintResolverSerializer(
+        source="resolved_by",
+        read_only=True,
+    )
+
     class Meta:
         model = Complaint
+
         fields = (
             "id",
             "course",
@@ -554,47 +981,105 @@ class ComplaintSerializer(serializers.ModelSerializer):
             "description",
             "status",
             "resolved_by",
+            "resolved_by_user",
             "resolved_at",
             "resolution_note",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "status", "resolved_by", "resolved_at", "resolution_note", "created_at", "updated_at")
+
+        read_only_fields = (
+            "id",
+            "status",
+            "resolved_by",
+            "resolved_by_user",
+            "resolved_at",
+            "resolution_note",
+            "created_at",
+            "updated_at",
+        )
 
 
-# ---------------------------
-# Notification
-# ---------------------------
+# =====================================================
+# NOTIFICATION
+# =====================================================
+
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
-        fields = ("id", "notif_type", "title", "body", "is_read", "course", "created_at")
+
+        fields = (
+            "id",
+            "notif_type",
+            "title",
+            "body",
+            "is_read",
+            "course",
+            "created_at",
+        )
+
         read_only_fields = fields
 
 
-# ---------------------------
-# Referral / Setting
-# ---------------------------
+# =====================================================
+# REFERRAL
+# =====================================================
+
 class ReferralSerializer(serializers.ModelSerializer):
-    owner_user = UserSerializer(read_only=True)
-    sponsor_user = UserSerializer(read_only=True)
+    owner_user = UserSerializer(
+        read_only=True
+    )
+
+    sponsor_user = UserSerializer(
+        read_only=True
+    )
 
     class Meta:
         model = Referral
-        fields = ("id", "code", "owner_user", "sponsor_user", "created_at", "updated_at")
+
+        fields = (
+            "id",
+            "code",
+            "owner_user",
+            "sponsor_user",
+            "created_at",
+            "updated_at",
+        )
+
         read_only_fields = fields
 
+
+# =====================================================
+# SETTING
+# =====================================================
 
 class SettingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Setting
-        fields = ("id", "setting_name", "value", "created_at", "updated_at")
-        read_only_fields = ("id", "created_at", "updated_at")
 
+        fields = (
+            "id",
+            "setting_name",
+            "value",
+            "created_at",
+            "updated_at",
+        )
+
+        read_only_fields = (
+            "id",
+            "created_at",
+            "updated_at",
+        )
+
+
+# =====================================================
+# TARIFF
+# =====================================================
 
 class TariffSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tariff
+
         fields = (
             "id",
             "service_tier",
@@ -605,53 +1090,45 @@ class TariffSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
+
         read_only_fields = fields
 
 
+# =====================================================
+# PRICE ESTIMATE
+# =====================================================
+
 class PriceEstimateQuerySerializer(serializers.Serializer):
-    departure_latitude = serializers.DecimalField(max_digits=9, decimal_places=6)
-    departure_longitude = serializers.DecimalField(max_digits=9, decimal_places=6)
-    destination_latitude = serializers.DecimalField(max_digits=9, decimal_places=6)
-    destination_longitude = serializers.DecimalField(max_digits=9, decimal_places=6)
+    departure_latitude = serializers.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+    )
+
+    departure_longitude = serializers.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+    )
+
+    destination_latitude = serializers.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+    )
+
+    destination_longitude = serializers.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+    )
 
 
 class PriceEstimateSerializer(serializers.Serializer):
     service_tier = serializers.CharField()
-    distance_km = serializers.DecimalField(max_digits=8, decimal_places=3)
-    price = serializers.DecimalField(max_digits=10, decimal_places=2)
 
+    distance_km = serializers.DecimalField(
+        max_digits=8,
+        decimal_places=3,
+    )
 
-class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
-    username_field = "email"
-
-    def validate(self, attrs):
-        data = super().validate(attrs)
-
-        refresh = RefreshToken(data["refresh"])
-        session_id = str(refresh["jti"])
-
-        refresh["sid"] = session_id
-
-        access = refresh.access_token
-        access["sid"] = session_id
-
-        data["refresh"] = str(refresh)
-        data["access"] = str(access)
-
-        return data
-
-
-class UserListSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = User
-        fields = (
-            "id",
-            "email",
-            "phone",
-            "first_name",
-            "last_name",
-            "user_type",
-            "is_active",
-            "created_at",
-        )
-
+    price = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+    )
