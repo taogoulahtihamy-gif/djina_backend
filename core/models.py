@@ -4,6 +4,7 @@ from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 from django.db.models import Q
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.utils import timezone
 
 
@@ -347,6 +348,119 @@ class Payment(TimeStampedSoftDeleteModel):
 
     def __str__(self):
         return f"Payment(Course={self.course_id}, {self.status})"
+
+
+# ---------------------------
+# Commissions Djina
+# ---------------------------
+class CommissionSetting(models.Model):
+    rate = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("15.00"),
+        validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))],
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="commission_settings_updated",
+    )
+    effective_at = models.DateTimeField(default=timezone.now)
+    singleton_key = models.BooleanField(default=True, unique=True, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(rate__gte=0, rate__lte=100),
+                name="commission_setting_rate_between_0_100",
+            ),
+        ]
+
+    def __str__(self):
+        return f"CommissionSetting({self.rate}%)"
+
+
+class CommissionSettlement(models.Model):
+    class PaymentMode(models.TextChoices):
+        CASH = "cash", "Cash"
+        AIRTEL_MONEY = "airtel_money", "Airtel Money"
+        MOOV_MONEY = "moov_money", "Moov Money"
+        BANK_TRANSFER = "bank_transfer", "Bank transfer"
+
+    driver = models.ForeignKey(Driver, on_delete=models.PROTECT, related_name="commission_settlements")
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    payment_mode = models.CharField(max_length=20, choices=PaymentMode.choices)
+    reference = models.CharField(max_length=100, null=True, blank=True)
+    paid_at = models.DateTimeField()
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="confirmed_commission_settlements",
+    )
+    confirmed_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(total_amount__gte=0),
+                name="commission_settlement_total_non_negative",
+            ),
+        ]
+
+    def __str__(self):
+        return f"CommissionSettlement({self.pk}, driver={self.driver_id})"
+
+
+class Commission(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PAID = "paid", "Paid"
+
+    course = models.OneToOneField(Course, on_delete=models.PROTECT, related_name="commission")
+    driver = models.ForeignKey(Driver, on_delete=models.PROTECT, related_name="commissions")
+    gross_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    commission_rate = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0")), MaxValueValidator(Decimal("100"))],
+    )
+    commission_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    driver_net_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
+    settlement = models.ForeignKey(
+        CommissionSettlement,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="commissions",
+    )
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=Q(gross_amount__gte=0), name="commission_gross_non_negative"),
+            models.CheckConstraint(condition=Q(commission_amount__gte=0), name="commission_amount_non_negative"),
+            models.CheckConstraint(condition=Q(driver_net_amount__gte=0), name="commission_net_non_negative"),
+            models.CheckConstraint(
+                condition=Q(commission_rate__gte=0, commission_rate__lte=100),
+                name="commission_rate_between_0_100",
+            ),
+            models.CheckConstraint(
+                condition=Q(status="pending", settlement__isnull=True) | Q(status="paid", settlement__isnull=False),
+                name="paid_commission_requires_settlement",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Commission(Course={self.course_id}, {self.status})"
 
 
 # ---------------------------

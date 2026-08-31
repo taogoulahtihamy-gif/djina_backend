@@ -21,6 +21,9 @@ from .views import (
     ReferralViewSet,
     SettingViewSet,
     NotificationViewSet,
+    CommissionSettingViewSet,
+    CommissionViewSet,
+    CommissionSettlementViewSet,
     dashboard_stats,  # Importer la fonction des stats
 )
 
@@ -40,6 +43,9 @@ router.register(r"complaints", ComplaintViewSet, basename="complaints")
 router.register(r"referrals", ReferralViewSet, basename="referrals")
 router.register(r"settings", SettingViewSet, basename="settings")
 router.register(r"notifications", NotificationViewSet, basename="notifications")
+router.register(r"commission-settings", CommissionSettingViewSet, basename="commission-settings")
+router.register(r"commissions", CommissionViewSet, basename="commissions")
+router.register(r"commission-settlements", CommissionSettlementViewSet, basename="commission-settlements")
 
 # IMPORTANT: Ne pas écraser urlpatterns, utiliser +=
 urlpatterns = [

@@ -20,6 +20,9 @@ from .models import (
     Setting,
     Tariff,
     Notification,
+    Commission,
+    CommissionSetting,
+    CommissionSettlement,
 )
 
 from .pricing import haversine_distance_km
@@ -67,6 +70,17 @@ class ComplaintResolveSerializer(serializers.Serializer):
         required=False,
         allow_blank=True,
     )
+
+
+class CommissionSettlementConfirmSerializer(serializers.Serializer):
+    driver_id = serializers.IntegerField()
+    commission_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        allow_empty=False,
+    )
+    payment_mode = serializers.ChoiceField(choices=CommissionSettlement.PaymentMode.choices)
+    reference = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    paid_at = serializers.DateTimeField(required=False)
 
 
 # =====================================================
@@ -1064,6 +1078,50 @@ class SettingSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         )
+
+
+class CommissionSettingSerializer(serializers.ModelSerializer):
+    updated_by = UserListSerializer(read_only=True)
+
+    class Meta:
+        model = CommissionSetting
+        fields = ("id", "rate", "updated_by", "effective_at", "created_at", "updated_at")
+        read_only_fields = ("id", "updated_by", "effective_at", "created_at", "updated_at")
+
+    def validate_rate(self, value):
+        if value < 0 or value > 100:
+            raise serializers.ValidationError("Rate must be between 0 and 100.")
+        return value
+
+
+class CommissionSettlementSerializer(serializers.ModelSerializer):
+    confirmed_by = UserListSerializer(read_only=True)
+
+    class Meta:
+        model = CommissionSettlement
+        fields = (
+            "id", "driver", "total_amount", "payment_mode", "reference", "paid_at",
+            "confirmed_by", "confirmed_at", "created_at", "updated_at",
+        )
+        read_only_fields = fields
+
+
+class CommissionSerializer(serializers.ModelSerializer):
+    starting_landmark = serializers.CharField(source="course.starting_landmark", read_only=True)
+    arrival_landmark = serializers.CharField(source="course.arrival_landmark", read_only=True)
+    completed_at = serializers.DateTimeField(source="course.completed_at", read_only=True)
+    settlement_reference = serializers.CharField(source="settlement.reference", read_only=True)
+    settlement_mode = serializers.CharField(source="settlement.payment_mode", read_only=True)
+
+    class Meta:
+        model = Commission
+        fields = (
+            "id", "course", "driver", "gross_amount", "commission_rate",
+            "commission_amount", "driver_net_amount", "status", "settlement", "paid_at",
+            "settlement_reference", "settlement_mode", "starting_landmark", "arrival_landmark",
+            "completed_at", "created_at", "updated_at",
+        )
+        read_only_fields = fields
 
         read_only_fields = (
             "id",

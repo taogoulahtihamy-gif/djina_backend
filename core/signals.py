@@ -29,6 +29,7 @@ from core.models import (
     DriverDocument,
     Payment,
 )
+from core.services.commission_service import ensure_commission_for_course
 
 
 def send_admin_event(
@@ -91,6 +92,8 @@ def course_saved(
     created,
     **kwargs,
 ):
+    ensure_commission_for_course(instance)
+
     schedule_admin_event(
         resource='courses',
 

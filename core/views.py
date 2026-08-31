@@ -33,6 +33,9 @@ from .models import (
     Setting,
     Tariff,
     Notification,
+    Commission,
+    CommissionSetting,
+    CommissionSettlement,
 )
 from .pricing import haversine_distance_km
 from .serializers import (
@@ -65,6 +68,16 @@ from .serializers import (
     ComplaintResolveSerializer,
     PriceEstimateQuerySerializer,
     PriceEstimateSerializer,
+    CommissionSerializer,
+    CommissionSettingSerializer,
+    CommissionSettlementSerializer,
+    CommissionSettlementConfirmSerializer,
+)
+from core.services.commission_service import (
+    CommissionSettlementError,
+    commission_summary,
+    confirm_commission_settlement,
+    get_current_commission_setting,
 )
 
 User = get_user_model()
@@ -949,6 +962,95 @@ class SettingViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminUser]
 
 
+class CommissionSettingViewSet(viewsets.GenericViewSet):
+    serializer_class = CommissionSettingSerializer
+    permission_classes = [IsAdminUser]
+    queryset = CommissionSetting.objects.all()
+
+    @action(detail=False, methods=["get", "patch"], url_path="current")
+    def current(self, request):
+        setting = get_current_commission_setting()
+        if request.method == "GET":
+            return Response(self.get_serializer(setting).data)
+        if not request.user.is_superuser:
+            raise PermissionDenied("Only a super administrator can change the commission rate.")
+        serializer = self.get_serializer(setting, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(updated_by=request.user, effective_at=timezone.now())
+        return Response(serializer.data)
+
+
+class CommissionViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = CommissionSerializer
+    permission_classes = [IsAdminUser]
+    queryset = Commission.objects.select_related("course", "driver", "settlement").order_by("-created_at")
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        params = self.request.query_params
+        if params.get("driver"):
+            queryset = queryset.filter(driver_id=params["driver"])
+        if params.get("status"):
+            queryset = queryset.filter(status=params["status"])
+        if params.get("course"):
+            queryset = queryset.filter(course_id=params["course"])
+        if params.get("date"):
+            queryset = queryset.filter(created_at__date=params["date"])
+        if params.get("from_date"):
+            queryset = queryset.filter(created_at__date__gte=params["from_date"])
+        if params.get("to_date"):
+            queryset = queryset.filter(created_at__date__lte=params["to_date"])
+        return queryset
+
+    @action(detail=False, methods=["get"], url_path="summary")
+    def summary(self, request):
+        queryset = self.get_queryset()
+        driver_id = request.query_params.get("driver_id")
+        if driver_id:
+            queryset = queryset.filter(driver_id=driver_id)
+        return Response(commission_summary(queryset))
+
+
+class CommissionSettlementViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = CommissionSettlementSerializer
+    permission_classes = [IsAdminUser]
+    queryset = CommissionSettlement.objects.select_related("driver", "confirmed_by").order_by("-paid_at")
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        params = self.request.query_params
+        if params.get("driver"):
+            queryset = queryset.filter(driver_id=params["driver"])
+        if params.get("date"):
+            queryset = queryset.filter(paid_at__date=params["date"])
+        if params.get("from_date"):
+            queryset = queryset.filter(paid_at__date__gte=params["from_date"])
+        if params.get("to_date"):
+            queryset = queryset.filter(paid_at__date__lte=params["to_date"])
+        return queryset
+
+    @action(detail=False, methods=["post"], url_path="confirm")
+    def confirm(self, request):
+        if not request.user.is_superuser:
+            raise PermissionDenied("Only a super administrator can confirm a settlement.")
+        payload = CommissionSettlementConfirmSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        data = payload.validated_data
+        driver = get_object_or_404(Driver, pk=data["driver_id"], deleted_at__isnull=True)
+        try:
+            settlement = confirm_commission_settlement(
+                driver=driver,
+                commission_ids=data["commission_ids"],
+                payment_mode=data["payment_mode"],
+                reference=data.get("reference"),
+                paid_at=data.get("paid_at"),
+                confirmed_by=request.user,
+            )
+        except CommissionSettlementError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(self.get_serializer(settlement).data, status=status.HTTP_201_CREATED)
+
+
 
 @api_view(['GET'])
 @extend_schema(description="Statistiques du dashboard admin")
@@ -958,6 +1060,7 @@ def dashboard_stats(request):
     if not request.user.is_staff:
         return Response({"detail": "Admin only"}, status=403)
     
+    commission_stats = commission_summary()
     stats = {
         "total_users": User.objects.filter(deleted_at__isnull=True).count(),
         "total_drivers": Driver.objects.filter(deleted_at__isnull=True).count(),
@@ -992,8 +1095,12 @@ def dashboard_stats(request):
             deleted_at__isnull=True,
             status=DriverDocument.DocStatus.PENDING
         ).count(),
+        "gross_course_volume": commission_stats["gross_course_volume"],
+        "commissions_generated": commission_stats["commissions_generated"],
+        "djina_revenue_collected": commission_stats["commissions_paid"],
+        "commissions_pending": commission_stats["commissions_pending"],
+        "drivers_net_revenue": commission_stats["driver_net_revenue"],
     }
     
     return Response(stats)
-
 
