@@ -549,3 +549,146 @@ class Notification(TimeStampedSoftDeleteModel):
 
     def __str__(self):
         return f"Notification({self.user_id}, {self.title})"
+
+
+# ---------------------------
+# Portefeuille prépayé chauffeur
+# ---------------------------
+class DriverWallet(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        BLOCKED = "blocked", "Blocked"
+        CLOSED = "closed", "Closed"
+
+    driver = models.OneToOneField(Driver, on_delete=models.PROTECT, related_name="wallet")
+    balance = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    reserved_balance = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    currency = models.CharField(max_length=3, default="XAF")
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.ACTIVE, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def available_balance(self):
+        return self.balance - self.reserved_balance
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=Q(balance__gte=0), name="wallet_balance_non_negative"),
+            models.CheckConstraint(condition=Q(reserved_balance__gte=0), name="wallet_reserved_non_negative"),
+            models.CheckConstraint(
+                condition=Q(reserved_balance__lte=models.F("balance")),
+                name="wallet_reserved_lte_balance",
+            ),
+        ]
+
+
+class WalletTransaction(models.Model):
+    """Journal financier destiné à être immuable dans la future couche service."""
+
+    class Type(models.TextChoices):
+        TOPUP = "topup", "Top up"
+        COMMISSION = "commission", "Commission"
+        REFUND = "refund", "Refund"
+        ADJUSTMENT = "adjustment", "Adjustment"
+
+    class Direction(models.TextChoices):
+        CREDIT = "credit", "Credit"
+        DEBIT = "debit", "Debit"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SUCCESS = "success", "Success"
+        FAILED = "failed", "Failed"
+        REVERSED = "reversed", "Reversed"
+
+    wallet = models.ForeignKey(DriverWallet, on_delete=models.PROTECT, related_name="transactions")
+    type = models.CharField(max_length=10, choices=Type.choices)
+    direction = models.CharField(max_length=6, choices=Direction.choices)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    balance_before = models.DecimalField(max_digits=14, decimal_places=2)
+    balance_after = models.DecimalField(max_digits=14, decimal_places=2)
+    course = models.ForeignKey(
+        Course, on_delete=models.PROTECT, null=True, blank=True, related_name="wallet_transactions",
+    )
+    commission = models.ForeignKey(
+        Commission, on_delete=models.PROTECT, null=True, blank=True, related_name="wallet_transactions",
+    )
+    provider = models.CharField(max_length=30, null=True, blank=True)
+    provider_reference = models.CharField(max_length=120, null=True, blank=True)
+    idempotency_key = models.CharField(max_length=120, unique=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gt=0), name="wallet_tx_amount_positive"),
+            models.CheckConstraint(condition=Q(balance_before__gte=0), name="wallet_tx_before_non_negative"),
+            models.CheckConstraint(condition=Q(balance_after__gte=0), name="wallet_tx_after_non_negative"),
+        ]
+        indexes = [
+            models.Index(fields=["wallet", "created_at"], name="wallet_tx_wallet_created_idx"),
+            models.Index(fields=["type", "created_at"], name="wallet_tx_type_created_idx"),
+            models.Index(fields=["status", "created_at"], name="wallet_tx_status_created_idx"),
+        ]
+
+
+class WalletTopUp(models.Model):
+    class Provider(models.TextChoices):
+        AIRTEL_MONEY = "airtel_money", "Airtel Money"
+        MOOV_MONEY = "moov_money", "Moov Money"
+        OTHER = "other", "Other"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SUCCESS = "success", "Success"
+        FAILED = "failed", "Failed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    wallet = models.ForeignKey(DriverWallet, on_delete=models.PROTECT, related_name="topups")
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    currency = models.CharField(max_length=3, default="XAF")
+    provider = models.CharField(max_length=20, choices=Provider.choices)
+    phone = models.CharField(max_length=20)
+    provider_reference = models.CharField(max_length=120, null=True, blank=True)
+    idempotency_key = models.CharField(max_length=120, unique=True)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
+    requested_at = models.DateTimeField(default=timezone.now)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    failure_reason = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gt=0), name="wallet_topup_amount_positive"),
+            models.UniqueConstraint(
+                fields=["provider", "provider_reference"],
+                condition=Q(provider_reference__isnull=False) & ~Q(provider_reference=""),
+                name="wallet_topup_provider_ref_unique",
+            ),
+        ]
+
+
+class CommissionReservation(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        CONSUMED = "consumed", "Consumed"
+        RELEASED = "released", "Released"
+
+    wallet = models.ForeignKey(DriverWallet, on_delete=models.PROTECT, related_name="commission_reservations")
+    course = models.OneToOneField(Course, on_delete=models.PROTECT, related_name="commission_reservation")
+    driver = models.ForeignKey(Driver, on_delete=models.PROTECT, related_name="commission_reservations")
+    estimated_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.ACTIVE, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    released_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=Q(estimated_amount__gt=0), name="commission_res_amount_positive"),
+        ]
