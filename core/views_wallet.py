@@ -20,6 +20,14 @@ from core.services.wallet_topup_service import (
     WalletTopUpConflictError,
     request_wallet_topup,
 )
+from core.services.wallet_topup_initiation_service import (
+    WalletTopUpInitiationConflictError,
+    WalletTopUpInitiationConsistencyError,
+    WalletTopUpInitiationError,
+    WalletTopUpInitiationProviderError,
+    WalletTopUpInitiationStateError,
+    initiate_wallet_topup,
+)
 from core.views import IsDriverUser
 
 
@@ -148,4 +156,71 @@ class DriverWalletViewSet(viewsets.GenericViewSet):
                 if created
                 else status.HTTP_200_OK
             ),
+        )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path=r"topups/(?P<topup_id>[0-9]+)/initiate",
+        url_name="topup-initiate",
+    )
+    def topup_initiate(
+        self,
+        request,
+        topup_id=None,
+    ):
+        wallet = self._wallet()
+
+        # Cloisonnement objet : un chauffeur ne peut initier
+        # qu'une recharge appartenant à son propre wallet.
+        topup = get_object_or_404(
+            WalletTopUp,
+            pk=int(topup_id),
+            wallet=wallet,
+        )
+
+        try:
+            result = initiate_wallet_topup(
+                topup_id=topup.pk,
+            )
+
+        except WalletTopUpInitiationStateError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        except (
+            WalletTopUpInitiationConflictError,
+            WalletTopUpInitiationConsistencyError,
+        ) as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        except WalletTopUpInitiationProviderError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        except WalletTopUpInitiationError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {
+                "initiated": result.initiated,
+                "provider_reference":
+                    result.provider_reference,
+                "provider_status":
+                    result.provider_status,
+                "topup": WalletTopUpSerializer(
+                    result.topup
+                ).data,
+            },
+            status=status.HTTP_200_OK,
         )
