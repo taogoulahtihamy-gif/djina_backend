@@ -390,6 +390,7 @@ class CommissionSettlement(models.Model):
         AIRTEL_MONEY = "airtel_money", "Airtel Money"
         MOOV_MONEY = "moov_money", "Moov Money"
         BANK_TRANSFER = "bank_transfer", "Bank transfer"
+        WALLET = "wallet", "Wallet"
 
     driver = models.ForeignKey(Driver, on_delete=models.PROTECT, related_name="commission_settlements")
     total_amount = models.DecimalField(max_digits=12, decimal_places=2)
@@ -400,6 +401,12 @@ class CommissionSettlement(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="confirmed_commission_settlements",
+        null=True,
+        blank=True,
+    )
+    wallet_transaction = models.OneToOneField(
+        "WalletTransaction", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="commission_settlement",
     )
     confirmed_at = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -410,6 +417,13 @@ class CommissionSettlement(models.Model):
             models.CheckConstraint(
                 condition=Q(total_amount__gte=0),
                 name="commission_settlement_total_non_negative",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    (~Q(payment_mode="wallet") & Q(confirmed_by__isnull=False, wallet_transaction__isnull=True))
+                    | Q(payment_mode="wallet", confirmed_by__isnull=True, wallet_transaction__isnull=False)
+                ),
+                name="commission_settlement_source_consistent",
             ),
         ]
 
@@ -682,6 +696,9 @@ class CommissionReservation(models.Model):
     course = models.OneToOneField(Course, on_delete=models.PROTECT, related_name="commission_reservation")
     driver = models.ForeignKey(Driver, on_delete=models.PROTECT, related_name="commission_reservations")
     estimated_amount = models.DecimalField(max_digits=14, decimal_places=2)
+    # Nullable pendant la transition ; aucun snapshot financier inventé.
+    gross_amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    commission_rate = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.ACTIVE, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -691,4 +708,19 @@ class CommissionReservation(models.Model):
     class Meta:
         constraints = [
             models.CheckConstraint(condition=Q(estimated_amount__gt=0), name="commission_res_amount_positive"),
+            models.CheckConstraint(
+                condition=(
+                    Q(gross_amount__isnull=True, commission_rate__isnull=True)
+                    | Q(gross_amount__isnull=False, commission_rate__isnull=False)
+                ),
+                name="commission_res_snapshot_complete",
+            ),
+            models.CheckConstraint(
+                condition=Q(gross_amount__isnull=True) | Q(gross_amount__gte=0),
+                name="commission_res_gross_non_negative",
+            ),
+            models.CheckConstraint(
+                condition=Q(commission_rate__isnull=True) | Q(commission_rate__gte=0, commission_rate__lte=100),
+                name="commission_res_rate_between_0_100",
+            ),
         ]
