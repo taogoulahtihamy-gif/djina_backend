@@ -42,9 +42,12 @@ class CourseAcceptSerializer(serializers.Serializer):
 
 
 class CourseCompleteSerializer(serializers.Serializer):
+    # Compatibilité avec les anciennes apps mobiles.
+    # Le backend ignore cette valeur pour tout calcul financier.
     final_price = serializers.DecimalField(
         max_digits=10,
         decimal_places=2,
+        required=False,
     )
 
 

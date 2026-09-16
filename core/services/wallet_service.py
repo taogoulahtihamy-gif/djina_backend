@@ -351,3 +351,229 @@ def consume_commission_reservation(*, reservation):
         reservation=reservation, target_status=CommissionReservation.Status.CONSUMED,
         timestamp_field="consumed_at",
     )
+
+
+def _normalize_commission_settlement_key(value):
+    if not isinstance(value, str):
+        raise WalletError("Invalid idempotency key.")
+
+    value = value.strip()
+
+    if not value or len(value) > 120:
+        raise WalletError("Invalid idempotency key.")
+
+    return value
+
+
+def _validate_settled_commission_transaction(
+    transaction_record,
+    *,
+    wallet_id,
+    reservation,
+    commission,
+    amount,
+    idempotency_key,
+):
+    expected = {
+        "wallet_id": wallet_id,
+        "amount": amount,
+        "type": WalletTransaction.Type.COMMISSION,
+        "direction": WalletTransaction.Direction.DEBIT,
+        "course_id": reservation.course_id,
+        "commission_id": commission.pk,
+        "idempotency_key": idempotency_key,
+        "status": WalletTransaction.Status.SUCCESS,
+    }
+
+    actual = {
+        "wallet_id": transaction_record.wallet_id,
+        "amount": transaction_record.amount,
+        "type": transaction_record.type,
+        "direction": transaction_record.direction,
+        "course_id": transaction_record.course_id,
+        "commission_id": transaction_record.commission_id,
+        "idempotency_key": transaction_record.idempotency_key,
+        "status": transaction_record.status,
+    }
+
+    if actual != expected:
+        raise WalletIdempotencyConflictError(
+            "Idempotency key belongs to a different wallet operation."
+        )
+
+    expected_after = transaction_record.balance_before - amount
+
+    if transaction_record.balance_after != expected_after:
+        raise WalletTransactionConsistencyError(
+            "Commission transaction balance is inconsistent."
+        )
+
+    return transaction_record
+
+
+@transaction.atomic
+def settle_commission_reservation(
+    *,
+    reservation,
+    commission,
+    idempotency_key,
+):
+    """Débite une commission déjà réservée.
+
+    Cette primitive est réservée aux commissions pré-réservées.
+
+    Ordre des verrous :
+        DriverWallet -> CommissionReservation -> Commission
+
+    Contrairement à debit_wallet(), un wallet BLOCKED ou CLOSED peut terminer
+    une obligation financière déjà réservée.
+
+    balance et reserved_balance diminuent du même montant. Le disponible reste
+    donc identique.
+    """
+    _require_saved_reservation_reference(reservation)
+
+    if commission.pk is None or commission._state.adding:
+        raise WalletTransactionConsistencyError(
+            "Commission must be saved."
+        )
+
+    idempotency_key = _normalize_commission_settlement_key(
+        idempotency_key
+    )
+
+    try:
+        wallet_id = (
+            CommissionReservation.objects
+            .values_list("wallet_id", flat=True)
+            .get(pk=reservation.pk)
+        )
+    except CommissionReservation.DoesNotExist as exc:
+        raise CommissionReservationError(
+            "Reservation no longer exists."
+        ) from exc
+
+    locked_wallet = (
+        DriverWallet.objects
+        .select_for_update()
+        .get(pk=wallet_id)
+    )
+
+    try:
+        locked_reservation = (
+            CommissionReservation.objects
+            .select_for_update()
+            .get(pk=reservation.pk)
+        )
+    except CommissionReservation.DoesNotExist as exc:
+        raise CommissionReservationError(
+            "Reservation no longer exists."
+        ) from exc
+
+    commission_model = type(commission)
+
+    try:
+        locked_commission = (
+            commission_model.objects
+            .select_for_update()
+            .get(pk=commission.pk)
+        )
+    except commission_model.DoesNotExist as exc:
+        raise WalletTransactionConsistencyError(
+            "Commission no longer exists."
+        ) from exc
+
+    if (
+        locked_reservation.wallet_id != locked_wallet.pk
+        or locked_reservation.driver_id != locked_commission.driver_id
+        or locked_reservation.course_id != locked_commission.course_id
+    ):
+        raise WalletTransactionConsistencyError(
+            "Reservation and commission do not match."
+        )
+
+    amount = _normalize_amount(
+        locked_reservation.estimated_amount
+    )
+
+    existing_transaction = WalletTransaction.objects.filter(
+        idempotency_key=idempotency_key
+    ).first()
+
+    if locked_reservation.status == CommissionReservation.Status.CONSUMED:
+        if existing_transaction is None:
+            raise WalletTransactionConsistencyError(
+                "Consumed reservation has no commission transaction."
+            )
+
+        return _validate_settled_commission_transaction(
+            existing_transaction,
+            wallet_id=locked_wallet.pk,
+            reservation=locked_reservation,
+            commission=locked_commission,
+            amount=amount,
+            idempotency_key=idempotency_key,
+        )
+
+    if locked_reservation.status == CommissionReservation.Status.RELEASED:
+        raise CommissionReservationStateError(
+            "Released reservation cannot be settled."
+        )
+
+    if locked_reservation.status != CommissionReservation.Status.ACTIVE:
+        raise CommissionReservationStateError(
+            "Reservation is not active."
+        )
+
+    if existing_transaction is not None:
+        raise WalletIdempotencyConflictError(
+            "Idempotency key already exists."
+        )
+
+    if locked_wallet.reserved_balance < amount:
+        raise WalletTransactionConsistencyError(
+            "Reserved balance is smaller than the reservation."
+        )
+
+    if locked_wallet.balance < amount:
+        raise WalletTransactionConsistencyError(
+            "Wallet balance is smaller than the reservation."
+        )
+
+    balance_before = locked_wallet.balance
+    balance_after = balance_before - amount
+
+    locked_wallet.balance = balance_after
+    locked_wallet.reserved_balance -= amount
+
+    locked_wallet.save(
+        update_fields=[
+            "balance",
+            "reserved_balance",
+            "updated_at",
+        ]
+    )
+
+    locked_reservation.status = CommissionReservation.Status.CONSUMED
+    locked_reservation.consumed_at = timezone.now()
+
+    locked_reservation.save(
+        update_fields=[
+            "status",
+            "consumed_at",
+            "updated_at",
+        ]
+    )
+
+    return WalletTransaction.objects.create(
+        wallet=locked_wallet,
+        type=WalletTransaction.Type.COMMISSION,
+        direction=WalletTransaction.Direction.DEBIT,
+        amount=amount,
+        balance_before=balance_before,
+        balance_after=balance_after,
+        course_id=locked_reservation.course_id,
+        commission=locked_commission,
+        idempotency_key=idempotency_key,
+        status=WalletTransaction.Status.SUCCESS,
+    )

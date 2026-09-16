@@ -204,3 +204,226 @@ def cancel_course_with_reservation_release(*, course_id, user, reason=""):
     )
 
     return course, cancelled_by
+
+
+class CourseCompletionStateError(CourseFinancialError):
+    pass
+
+
+class CourseCompletionPermissionError(CourseFinancialError):
+    pass
+
+
+class CourseCompletionFinancialError(CourseFinancialError):
+    pass
+
+
+@transaction.atomic
+def complete_course_with_wallet_commission(*, course_id, user):
+    """Termine atomiquement une course et encaisse la commission réservée.
+
+    Ordre financier global :
+        Course -> DriverWallet -> CommissionReservation -> Commission
+
+    Le prix et le taux proviennent exclusivement du snapshot créé lors
+    de l'acceptation. Aucun montant fourni par l'application chauffeur
+    n'est utilisé.
+    """
+    from core.models import (
+        Commission,
+        CommissionSettlement,
+        WalletTransaction,
+    )
+    from core.services.wallet_service import (
+        CommissionReservationError,
+        WalletError,
+        settle_commission_reservation,
+    )
+
+    try:
+        course = (
+            Course.objects.select_for_update()
+            .select_related("driver__user")
+            .get(pk=course_id, deleted_at__isnull=True)
+        )
+    except Course.DoesNotExist as exc:
+        raise CourseCompletionStateError(
+            "Course is not in picked_up state."
+        ) from exc
+
+    if course.status != Course.Status.PICKED_UP:
+        raise CourseCompletionStateError(
+            "Course is not in picked_up state."
+        )
+
+    if (
+        course.driver_id is None
+        or course.driver.user_id != getattr(user, "pk", None)
+    ):
+        raise CourseCompletionPermissionError(
+            "Not your course."
+        )
+
+    try:
+        reservation = CommissionReservation.objects.get(
+            course_id=course.pk
+        )
+    except CommissionReservation.DoesNotExist as exc:
+        raise CourseCompletionFinancialError(
+            "Commission reservation is missing."
+        ) from exc
+
+    if reservation.status != CommissionReservation.Status.ACTIVE:
+        raise CourseCompletionFinancialError(
+            "Commission reservation is not active."
+        )
+
+    if (
+        reservation.driver_id != course.driver_id
+        or reservation.gross_amount is None
+        or reservation.commission_rate is None
+    ):
+        raise CourseCompletionFinancialError(
+            "Invalid commission reservation."
+        )
+
+    gross_amount = _financial_decimal(
+        reservation.gross_amount
+    )
+    rate = _financial_decimal(
+        reservation.commission_rate
+    )
+    commission_amount = _financial_decimal(
+        reservation.estimated_amount
+    )
+
+    if (
+        gross_amount <= 0
+        or commission_amount <= 0
+        or rate <= 0
+        or rate > Decimal("100")
+    ):
+        raise CourseCompletionFinancialError(
+            "Invalid commission reservation."
+        )
+
+    expected_commission = quantize_money(
+        gross_amount * rate / Decimal("100")
+    )
+
+    if commission_amount != expected_commission:
+        raise CourseCompletionFinancialError(
+            "Commission reservation amount is inconsistent."
+        )
+
+    driver_net_amount = quantize_money(
+        gross_amount - commission_amount
+    )
+
+    if driver_net_amount < 0:
+        raise CourseCompletionFinancialError(
+            "Invalid commission reservation."
+        )
+
+    commission = Commission.objects.filter(
+        course_id=course.pk
+    ).first()
+
+    if commission is None:
+        commission = Commission.objects.create(
+            course=course,
+            driver=course.driver,
+            gross_amount=gross_amount,
+            commission_rate=rate,
+            commission_amount=commission_amount,
+            driver_net_amount=driver_net_amount,
+            status=Commission.Status.PENDING,
+        )
+    else:
+        expected_identity = (
+            course.driver_id,
+            gross_amount,
+            rate,
+            commission_amount,
+            driver_net_amount,
+        )
+        actual_identity = (
+            commission.driver_id,
+            commission.gross_amount,
+            commission.commission_rate,
+            commission.commission_amount,
+            commission.driver_net_amount,
+        )
+
+        if (
+            actual_identity != expected_identity
+            or commission.status != Commission.Status.PENDING
+            or commission.settlement_id is not None
+        ):
+            raise CourseCompletionFinancialError(
+                "Existing commission is inconsistent."
+            )
+
+    idempotency_key = f"course:{course.pk}:commission"
+
+    try:
+        wallet_transaction = settle_commission_reservation(
+            reservation=reservation,
+            commission=commission,
+            idempotency_key=idempotency_key,
+        )
+    except (WalletError, CommissionReservationError) as exc:
+        raise CourseCompletionFinancialError(
+            "Commission could not be settled."
+        ) from exc
+
+    if (
+        wallet_transaction.type != WalletTransaction.Type.COMMISSION
+        or wallet_transaction.direction != WalletTransaction.Direction.DEBIT
+        or wallet_transaction.status != WalletTransaction.Status.SUCCESS
+        or wallet_transaction.amount != commission_amount
+        or wallet_transaction.course_id != course.pk
+        or wallet_transaction.commission_id != commission.pk
+    ):
+        raise CourseCompletionFinancialError(
+            "Invalid wallet commission transaction."
+        )
+
+    paid_at = timezone.now()
+
+    settlement = CommissionSettlement.objects.create(
+        driver=course.driver,
+        total_amount=commission_amount,
+        payment_mode=CommissionSettlement.PaymentMode.WALLET,
+        reference=idempotency_key,
+        paid_at=paid_at,
+        confirmed_by=None,
+        wallet_transaction=wallet_transaction,
+        confirmed_at=paid_at,
+    )
+
+    commission.status = Commission.Status.PAID
+    commission.settlement = settlement
+    commission.paid_at = paid_at
+    commission.save(
+        update_fields=[
+            "status",
+            "settlement",
+            "paid_at",
+            "updated_at",
+        ]
+    )
+
+    # Prix autoritaire : snapshot gelé lors de l'acceptation.
+    course.final_price = gross_amount
+    course.status = Course.Status.COMPLETED
+    course.completed_at = paid_at
+    course.save(
+        update_fields=[
+            "final_price",
+            "status",
+            "completed_at",
+        ]
+    )
+
+    return course

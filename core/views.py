@@ -730,19 +730,28 @@ class CourseViewSet(viewsets.ModelViewSet):
     )
     @action(detail=True, methods=["post"], permission_classes=[IsDriverUser], url_path="complete")
     def complete(self, request, pk=None):
-        course = self.get_object()
-        if course.status != Course.Status.PICKED_UP:
-            return Response({"detail": "Course is not in picked_up state."}, status=400)
-        if course.driver is None or course.driver.user != request.user:
-            return Response({"detail": "Not your course."}, status=403)
-
         payload = CourseCompleteSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
 
-        course.final_price = payload.validated_data["final_price"]
-        course.status = Course.Status.COMPLETED
-        course.completed_at = timezone.now()
-        course.save(update_fields=["final_price", "status", "completed_at"])
+        from core.services.course_financial_service import (
+            CourseCompletionFinancialError,
+            CourseCompletionPermissionError,
+            CourseCompletionStateError,
+            complete_course_with_wallet_commission,
+        )
+
+        try:
+            course = complete_course_with_wallet_commission(
+                course_id=pk,
+                user=request.user,
+            )
+        except CourseCompletionStateError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        except CourseCompletionPermissionError as exc:
+            return Response({"detail": str(exc)}, status=403)
+        except CourseCompletionFinancialError as exc:
+            return Response({"detail": str(exc)}, status=409)
+
         return Response(CourseSerializer(course).data)
 
     @extend_schema(
