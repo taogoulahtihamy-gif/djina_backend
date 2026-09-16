@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from core.views_otp import OTPViewSet
+from core.views_wallet import DriverWalletViewSet
 
 from .views import (
     EmailTokenObtainPairView,  # Importer votre vue personnalisée
@@ -46,6 +47,7 @@ router.register(r"notifications", NotificationViewSet, basename="notifications")
 router.register(r"commission-settings", CommissionSettingViewSet, basename="commission-settings")
 router.register(r"commissions", CommissionViewSet, basename="commissions")
 router.register(r"commission-settlements", CommissionSettlementViewSet, basename="commission-settlements")
+router.register(r"wallet", DriverWalletViewSet, basename="wallet")
 
 # IMPORTANT: Ne pas écraser urlpatterns, utiliser +=
 urlpatterns = [
