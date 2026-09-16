@@ -191,6 +191,21 @@ def _validate_confirmation_identity(
         )
 
 
+def _normalize_callback_provider_status(
+    provider_status,
+    *,
+    fallback,
+):
+    if provider_status in (None, ""):
+        provider_status = fallback
+
+    return _normalize_text(
+        provider_status,
+        field="provider status",
+        max_length=50,
+    )
+
+
 @transaction.atomic
 def confirm_wallet_topup(
     *,
@@ -198,6 +213,7 @@ def confirm_wallet_topup(
     provider,
     provider_reference,
     confirmed_amount,
+    provider_status=None,
 ):
     """Confirme côté serveur une recharge réellement payée.
 
@@ -218,6 +234,13 @@ def confirm_wallet_topup(
 
     confirmed_amount = _normalize_amount(
         confirmed_amount
+    )
+
+    provider_status = (
+        _normalize_callback_provider_status(
+            provider_status,
+            fallback=WalletTopUp.Status.SUCCESS,
+        )
     )
 
     if provider not in WalletTopUp.Provider.values:
@@ -277,6 +300,20 @@ def confirm_wallet_topup(
             metadata={"topup_id": locked_topup.pk},
         )
 
+        if (
+            locked_topup.provider_status
+            != provider_status
+        ):
+            locked_topup.provider_status = (
+                provider_status
+            )
+            locked_topup.save(
+                update_fields=[
+                    "provider_status",
+                    "updated_at",
+                ]
+            )
+
         return locked_topup, wallet_transaction, False
 
     if locked_topup.status in (
@@ -323,6 +360,7 @@ def confirm_wallet_topup(
     )
 
     locked_topup.provider_reference = provider_reference
+    locked_topup.provider_status = provider_status
     locked_topup.status = WalletTopUp.Status.SUCCESS
     locked_topup.confirmed_at = timezone.now()
     locked_topup.failure_reason = None
@@ -331,6 +369,7 @@ def confirm_wallet_topup(
         locked_topup.save(
             update_fields=[
                 "provider_reference",
+                "provider_status",
                 "status",
                 "confirmed_at",
                 "failure_reason",
@@ -374,6 +413,7 @@ def fail_wallet_topup(
     provider_reference,
     amount,
     failure_reason,
+    provider_status=None,
 ):
     """Enregistre un échec fournisseur sans aucun mouvement financier.
 
@@ -390,6 +430,13 @@ def fail_wallet_topup(
     )
 
     amount = _normalize_amount(amount)
+
+    provider_status = (
+        _normalize_callback_provider_status(
+            provider_status,
+            fallback=WalletTopUp.Status.FAILED,
+        )
+    )
 
     failure_reason = _normalize_failure_reason(
         failure_reason
@@ -442,6 +489,20 @@ def fail_wallet_topup(
                 "Failure callback does not match existing history."
             )
 
+        if (
+            locked_topup.provider_status
+            != provider_status
+        ):
+            locked_topup.provider_status = (
+                provider_status
+            )
+            locked_topup.save(
+                update_fields=[
+                    "provider_status",
+                    "updated_at",
+                ]
+            )
+
         return locked_topup, False
 
     if locked_topup.status != WalletTopUp.Status.PENDING:
@@ -465,6 +526,7 @@ def fail_wallet_topup(
         )
 
     locked_topup.provider_reference = provider_reference
+    locked_topup.provider_status = provider_status
     locked_topup.status = WalletTopUp.Status.FAILED
     locked_topup.failure_reason = failure_reason
     locked_topup.confirmed_at = None
@@ -473,6 +535,7 @@ def fail_wallet_topup(
         locked_topup.save(
             update_fields=[
                 "provider_reference",
+                "provider_status",
                 "status",
                 "failure_reason",
                 "confirmed_at",

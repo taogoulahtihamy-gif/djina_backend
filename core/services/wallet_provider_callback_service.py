@@ -27,6 +27,7 @@ def process_wallet_provider_callback(
     amount,
     callback_status,
     failure_reason=None,
+    provider_status=None,
 ):
     """Traite un événement fournisseur déjà authentifié et validé.
 
@@ -46,6 +47,7 @@ def process_wallet_provider_callback(
                 provider=provider,
                 provider_reference=provider_reference,
                 confirmed_amount=amount,
+                provider_status=provider_status,
             )
         )
 
@@ -67,6 +69,7 @@ def process_wallet_provider_callback(
             provider_reference=provider_reference,
             amount=amount,
             failure_reason=failure_reason,
+            provider_status=provider_status,
         )
 
         return WalletProviderCallbackResult(
