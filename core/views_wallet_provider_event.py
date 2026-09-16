@@ -1,5 +1,16 @@
+from datetime import datetime
+
+from django.utils import timezone
+from django.utils.dateparse import (
+    parse_date,
+    parse_datetime,
+)
+
 from rest_framework.exceptions import (
     ValidationError,
+)
+from rest_framework.pagination import (
+    PageNumberPagination,
 )
 from rest_framework.permissions import (
     BasePermission,
@@ -65,13 +76,98 @@ class IsWalletProviderEventAdmin(
         )
 
 
+class WalletProviderEventPagination(
+    PageNumberPagination
+):
+    page_size = 50
+    page_size_query_param = "page_size"
+    max_page_size = 200
+
+
+def _parse_boolean_filter(
+    value,
+    *,
+    field,
+):
+    normalized = (
+        str(value)
+        .strip()
+        .lower()
+    )
+
+    if normalized in {
+        "true",
+        "1",
+    }:
+        return True
+
+    if normalized in {
+        "false",
+        "0",
+    }:
+        return False
+
+    raise ValidationError(
+        {
+            field:
+                "Expected true, false, 1 or 0."
+        }
+    )
+
+
+def _parse_datetime_filter(
+    value,
+    *,
+    field,
+    end_of_day=False,
+):
+    value = str(value).strip()
+
+    parsed = parse_datetime(
+        value
+    )
+
+    if parsed is None:
+        parsed_date = parse_date(
+            value
+        )
+
+        if parsed_date is None:
+            raise ValidationError(
+                {
+                    field:
+                        "Expected an ISO 8601 date or datetime."
+                }
+            )
+
+        if end_of_day:
+            parsed = datetime.combine(
+                parsed_date,
+                datetime.max.time(),
+            )
+        else:
+            parsed = datetime.combine(
+                parsed_date,
+                datetime.min.time(),
+            )
+
+    if timezone.is_naive(
+        parsed
+    ):
+        parsed = timezone.make_aware(
+            parsed,
+            timezone.get_current_timezone(),
+        )
+
+    return parsed
+
+
 class WalletProviderEventAdminViewSet(
     ReadOnlyModelViewSet
 ):
     """Journal fournisseur visible uniquement en admin.
 
-    Aucune création, modification ou suppression
-    n'est exposée par cette API.
+    API strictement read-only.
     """
 
     serializer_class = (
@@ -82,6 +178,10 @@ class WalletProviderEventAdminViewSet(
         IsAuthenticated,
         IsWalletProviderEventAdmin,
     ]
+
+    pagination_class = (
+        WalletProviderEventPagination
+    )
 
     http_method_names = [
         "get",
@@ -160,6 +260,47 @@ class WalletProviderEventAdminViewSet(
                 outcome=outcome
             )
 
+        callback_status = params.get(
+            "callback_status"
+        )
+
+        if callback_status:
+            callback_status = (
+                callback_status.strip()
+            )
+
+            if callback_status not in {
+                WalletTopUp.Status.SUCCESS,
+                WalletTopUp.Status.FAILED,
+            }:
+                raise ValidationError(
+                    {
+                        "callback_status":
+                            "Invalid callback status."
+                    }
+                )
+
+            queryset = queryset.filter(
+                callback_status=
+                    callback_status
+            )
+
+        processed = params.get(
+            "processed"
+        )
+
+        if processed is not None:
+            processed_value = (
+                _parse_boolean_filter(
+                    processed,
+                    field="processed",
+                )
+            )
+
+            queryset = queryset.filter(
+                processed=processed_value
+            )
+
         topup = params.get(
             "topup"
         )
@@ -186,9 +327,6 @@ class WalletProviderEventAdminViewSet(
                     }
                 )
 
-            # reported_topup_id permet aussi
-            # de retrouver un callback reçu pour
-            # un TopUp inexistant/localement supprimé.
             queryset = queryset.filter(
                 reported_topup_id=
                     topup_id
@@ -225,6 +363,59 @@ class WalletProviderEventAdminViewSet(
             queryset = queryset.filter(
                 provider_reference=
                     provider_reference
+            )
+
+        error_type = params.get(
+            "error_type"
+        )
+
+        if error_type:
+            error_type = (
+                error_type.strip()
+            )
+
+            if (
+                not error_type
+                or len(error_type) > 100
+                or "\r" in error_type
+                or "\n" in error_type
+            ):
+                raise ValidationError(
+                    {
+                        "error_type":
+                            "Invalid error type."
+                    }
+                )
+
+            queryset = queryset.filter(
+                error_type=error_type
+            )
+
+        created_from = params.get(
+            "created_from"
+        )
+
+        if created_from:
+            queryset = queryset.filter(
+                created_at__gte=
+                    _parse_datetime_filter(
+                        created_from,
+                        field="created_from",
+                    )
+            )
+
+        created_to = params.get(
+            "created_to"
+        )
+
+        if created_to:
+            queryset = queryset.filter(
+                created_at__lte=
+                    _parse_datetime_filter(
+                        created_to,
+                        field="created_to",
+                        end_of_day=True,
+                    )
             )
 
         return queryset
