@@ -29,6 +29,8 @@ from .views import (
     dashboard_stats,  # Importer la fonction des stats
 )
 
+from core.views_wallet_provider_event import WalletProviderEventAdminViewSet
+
 router = DefaultRouter()
 router.register(r"auth", AuthViewSet, basename="auth")
 router.register(r"admin/users", AdminCreateViewSet, basename="admin-users")
@@ -50,7 +52,12 @@ router.register(r"commissions", CommissionViewSet, basename="commissions")
 router.register(r"commission-settlements", CommissionSettlementViewSet, basename="commission-settlements")
 router.register(r"wallet", DriverWalletViewSet, basename="wallet")
 
-# IMPORTANT: Ne pas écraser urlpatterns, utiliser +=
+router.register(
+    r"admin/wallet-provider-events",
+    WalletProviderEventAdminViewSet,
+    basename="wallet-provider-events",
+)
+
 urlpatterns = [
     # Auth JWT - UTILISER VOTRE VUE PERSONNALISÉE
     path('auth/token/', EmailTokenObtainPairView.as_view(), name='token_obtain_pair'),
