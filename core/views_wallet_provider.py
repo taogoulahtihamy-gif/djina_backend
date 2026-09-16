@@ -22,8 +22,8 @@ from core.services.wallet_service import (
     WalletError,
     WalletNotActiveError,
 )
-from core.services.wallet_provider_callback_service import (
-    process_wallet_provider_callback,
+from core.services.wallet_provider_event_service import (
+    process_journaled_wallet_provider_callback,
 )
 from core.services.wallet_topup_service import (
     WalletTopUpConflictError,
@@ -147,7 +147,7 @@ class MockWalletTopUpWebhookView(APIView):
         data = serializer.validated_data
 
         try:
-            result = process_wallet_provider_callback(
+            result = process_journaled_wallet_provider_callback(
                 topup_id=data["topup_id"],
                 provider=data["provider"],
                 provider_reference=data[

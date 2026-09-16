@@ -733,3 +733,123 @@ class CommissionReservation(models.Model):
                 name="commission_res_rate_between_0_100",
             ),
         ]
+
+
+class WalletProviderEvent(models.Model):
+    class Outcome(models.TextChoices):
+        RECEIVED = "received", "Received"
+        ACCEPTED = "accepted", "Accepted"
+        REJECTED = "rejected", "Rejected"
+
+    topup = models.ForeignKey(
+        "WalletTopUp",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="provider_events",
+    )
+
+    reported_topup_id = models.PositiveBigIntegerField()
+
+    provider = models.CharField(
+        max_length=30,
+        choices=WalletTopUp.Provider.choices,
+    )
+
+    provider_reference = models.CharField(
+        max_length=120,
+    )
+
+    callback_status = models.CharField(
+        max_length=20,
+    )
+
+    provider_status = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+    )
+
+    amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+    )
+
+    failure_reason = models.TextField(
+        blank=True,
+        default="",
+    )
+
+    outcome = models.CharField(
+        max_length=20,
+        choices=Outcome.choices,
+        default=Outcome.RECEIVED,
+    )
+
+    processed = models.BooleanField(
+        null=True,
+        blank=True,
+    )
+
+    wallet_transaction = models.ForeignKey(
+        "WalletTransaction",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="provider_events",
+    )
+
+    error_type = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+    )
+
+    error_message = models.TextField(
+        blank=True,
+        default="",
+    )
+
+    completed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+    )
+
+    updated_at = models.DateTimeField(
+        auto_now=True,
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+
+        indexes = [
+            models.Index(
+                fields=[
+                    "provider",
+                    "provider_reference",
+                ]
+            ),
+            models.Index(
+                fields=[
+                    "reported_topup_id",
+                    "created_at",
+                ]
+            ),
+            models.Index(
+                fields=[
+                    "outcome",
+                    "created_at",
+                ]
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.provider}:"
+            f"{self.provider_reference}:"
+            f"{self.outcome}"
+        )
