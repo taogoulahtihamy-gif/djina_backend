@@ -5,6 +5,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 
 from core.views_otp import OTPViewSet
 from core.views_wallet import DriverWalletViewSet
+from core.views_wallet_provider import MockWalletTopUpWebhookView
 
 from .views import (
     EmailTokenObtainPairView,  # Importer votre vue personnalisée
@@ -57,6 +58,7 @@ urlpatterns = [
     
     # Stats dashboard
     path('admin/dashboard/stats/', dashboard_stats, name='dashboard-stats'),
+    path('wallet/webhooks/mock/', MockWalletTopUpWebhookView.as_view(), name='wallet-mock-webhook'),
 ]
 
 # Ajouter les routes du router

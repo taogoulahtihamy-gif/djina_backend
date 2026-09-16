@@ -356,3 +356,145 @@ def confirm_wallet_topup(
         raise
 
     return locked_topup, wallet_transaction, True
+
+
+def _normalize_failure_reason(value):
+    return _normalize_text(
+        value,
+        field="failure reason",
+        max_length=1000,
+    )
+
+
+@transaction.atomic
+def fail_wallet_topup(
+    *,
+    topup_id,
+    provider,
+    provider_reference,
+    amount,
+    failure_reason,
+):
+    """Enregistre un échec fournisseur sans aucun mouvement financier.
+
+    Ordre des verrous :
+        DriverWallet -> WalletTopUp
+
+    Un callback FAILED répété à l'identique est idempotent.
+    """
+
+    provider_reference = _normalize_text(
+        provider_reference,
+        field="provider reference",
+        max_length=120,
+    )
+
+    amount = _normalize_amount(amount)
+
+    failure_reason = _normalize_failure_reason(
+        failure_reason
+    )
+
+    if provider not in WalletTopUp.Provider.values:
+        raise WalletTopUpError("Invalid provider.")
+
+    try:
+        wallet_id = (
+            WalletTopUp.objects
+            .values_list("wallet_id", flat=True)
+            .get(pk=topup_id)
+        )
+    except WalletTopUp.DoesNotExist as exc:
+        raise WalletTopUpError(
+            "Top-up request does not exist."
+        ) from exc
+
+    DriverWallet.objects.select_for_update().get(
+        pk=wallet_id
+    )
+
+    locked_topup = (
+        WalletTopUp.objects
+        .select_for_update()
+        .get(pk=topup_id)
+    )
+
+    _validate_confirmation_identity(
+        locked_topup,
+        provider=provider,
+        provider_reference=provider_reference,
+        confirmed_amount=amount,
+    )
+
+    if locked_topup.status == WalletTopUp.Status.SUCCESS:
+        raise WalletTopUpStateError(
+            "Successful top-up cannot be marked failed."
+        )
+
+    if locked_topup.status == WalletTopUp.Status.CANCELLED:
+        raise WalletTopUpStateError(
+            "Cancelled top-up cannot be marked failed."
+        )
+
+    if locked_topup.status == WalletTopUp.Status.FAILED:
+        if locked_topup.failure_reason != failure_reason:
+            raise WalletTopUpConflictError(
+                "Failure callback does not match existing history."
+            )
+
+        return locked_topup, False
+
+    if locked_topup.status != WalletTopUp.Status.PENDING:
+        raise WalletTopUpStateError(
+            "Top-up request is not pending."
+        )
+
+    duplicate = (
+        WalletTopUp.objects
+        .filter(
+            provider=provider,
+            provider_reference=provider_reference,
+        )
+        .exclude(pk=locked_topup.pk)
+        .exists()
+    )
+
+    if duplicate:
+        raise WalletTopUpConflictError(
+            "Provider reference is already used."
+        )
+
+    locked_topup.provider_reference = provider_reference
+    locked_topup.status = WalletTopUp.Status.FAILED
+    locked_topup.failure_reason = failure_reason
+    locked_topup.confirmed_at = None
+
+    try:
+        locked_topup.save(
+            update_fields=[
+                "provider_reference",
+                "status",
+                "failure_reason",
+                "confirmed_at",
+                "updated_at",
+            ]
+        )
+    except IntegrityError as exc:
+        duplicate = (
+            WalletTopUp.objects
+            .filter(
+                provider=provider,
+                provider_reference=provider_reference,
+            )
+            .exclude(pk=locked_topup.pk)
+            .exists()
+        )
+
+        if duplicate:
+            raise WalletTopUpConflictError(
+                "Provider reference is already used."
+            ) from exc
+
+        raise
+
+    return locked_topup, True
