@@ -1,3 +1,10 @@
+from core.services.course_financial_service import (
+    CourseAcceptanceStateError, CourseAcceptanceVehicleError, CourseFinancialError,
+    accept_course_with_commission_reservation,
+)
+from core.services.wallet_service import (
+    CommissionReservationError, InsufficientWalletBalanceError, WalletNotActiveError,
+)
 from django.contrib.auth import get_user_model
 from django.db import transaction, models
 from django.db.models import Sum
@@ -659,27 +666,25 @@ class CourseViewSet(viewsets.ModelViewSet):
     )
     @action(detail=True, methods=["post"], permission_classes=[IsDriverUser], url_path="accept")
     def accept(self, request, pk=None):
-        course = self.get_object()
-        if course.status != Course.Status.REQUESTED:
-            return Response({"detail": "Course is not in requested state."}, status=400)
-
         payload = CourseAcceptSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
-
-        driver = Driver.objects.get(user=request.user, deleted_at__isnull=True, is_enabled=True)
-
-        vehicle = None
-        vehicle_id = payload.validated_data.get("vehicle_id")
-        if vehicle_id:
-            vehicle = Vehicle.objects.get(
-                id=vehicle_id, driver=driver, deleted_at__isnull=True, is_active=True
+        try:
+            driver = Driver.objects.get(user=request.user, deleted_at__isnull=True, is_enabled=True)
+        except Driver.DoesNotExist:
+            return Response({"detail": "Driver is not active."}, status=400)
+        try:
+            course = accept_course_with_commission_reservation(
+                course_id=pk, driver=driver,
+                vehicle_id=payload.validated_data.get("vehicle_id"),
             )
-
-        course.driver = driver
-        course.vehicle = vehicle
-        course.status = Course.Status.ACCEPTED
-        course.accepted_at = timezone.now()
-        course.save(update_fields=["driver", "vehicle", "status", "accepted_at"])
+        except (CourseAcceptanceStateError, CourseAcceptanceVehicleError) as exc:
+            return Response({"detail": str(exc)}, status=400)
+        except InsufficientWalletBalanceError:
+            return Response({"detail": "Insufficient available wallet balance."}, status=409)
+        except WalletNotActiveError:
+            return Response({"detail": "Wallet must be active."}, status=409)
+        except (CourseFinancialError, CommissionReservationError):
+            return Response({"detail": "Course financial reservation failed."}, status=409)
         return Response(CourseSerializer(course).data)
 
     @extend_schema(
