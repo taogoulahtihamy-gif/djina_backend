@@ -236,6 +236,10 @@ def confirm_wallet_topup(
         confirmed_amount
     )
 
+    provider_status_was_supplied = (
+        provider_status not in (None, "")
+    )
+
     provider_status = (
         _normalize_callback_provider_status(
             provider_status,
@@ -290,20 +294,22 @@ def confirm_wallet_topup(
                 "Successful top-up has no wallet transaction."
             )
 
-        wallet_transaction = credit_wallet(
-            wallet=locked_wallet,
-            amount=locked_topup.amount,
-            transaction_type=WalletTransaction.Type.TOPUP,
-            idempotency_key=transaction_key,
-            provider=locked_topup.provider,
-            provider_reference=provider_reference,
-            metadata={"topup_id": locked_topup.pk},
-        )
+        stored_provider_status = (
+            locked_topup.provider_status or ""
+        ).strip()
 
-        if (
-            locked_topup.provider_status
-            != provider_status
-        ):
+        if stored_provider_status:
+            if (
+                provider_status_was_supplied
+                and stored_provider_status
+                != provider_status
+            ):
+                raise WalletTopUpConflictError(
+                    "Provider status does not match existing successful top-up."
+                )
+        else:
+            # Compatibilité avec les anciens top-ups SUCCESS
+            # créés avant la persistance de provider_status.
             locked_topup.provider_status = (
                 provider_status
             )
@@ -313,6 +319,16 @@ def confirm_wallet_topup(
                     "updated_at",
                 ]
             )
+
+        wallet_transaction = credit_wallet(
+            wallet=locked_wallet,
+            amount=locked_topup.amount,
+            transaction_type=WalletTransaction.Type.TOPUP,
+            idempotency_key=transaction_key,
+            provider=locked_topup.provider,
+            provider_reference=provider_reference,
+            metadata={"topup_id": locked_topup.pk},
+        )
 
         return locked_topup, wallet_transaction, False
 
@@ -431,6 +447,10 @@ def fail_wallet_topup(
 
     amount = _normalize_amount(amount)
 
+    provider_status_was_supplied = (
+        provider_status not in (None, "")
+    )
+
     provider_status = (
         _normalize_callback_provider_status(
             provider_status,
@@ -489,10 +509,21 @@ def fail_wallet_topup(
                 "Failure callback does not match existing history."
             )
 
-        if (
-            locked_topup.provider_status
-            != provider_status
-        ):
+        stored_provider_status = (
+            locked_topup.provider_status or ""
+        ).strip()
+
+        if stored_provider_status:
+            if (
+                provider_status_was_supplied
+                and stored_provider_status
+                != provider_status
+            ):
+                raise WalletTopUpConflictError(
+                    "Provider status does not match existing failed top-up."
+                )
+        else:
+            # Compatibilité avec les anciens top-ups FAILED.
             locked_topup.provider_status = (
                 provider_status
             )
