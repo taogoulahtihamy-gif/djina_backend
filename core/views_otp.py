@@ -121,10 +121,20 @@ class OTPViewSet(viewsets.GenericViewSet):
         user.save(update_fields=["phone_verified"])
 
         refresh = RefreshToken.for_user(user)
+
+        session_id = str(
+            refresh["jti"]
+        )
+
+        refresh["sid"] = session_id
+
+        access = refresh.access_token
+        access["sid"] = session_id
+
         return _success_response(
             "Connexion réussie.",
             {
-                "access": str(refresh.access_token),
+                "access": str(access),
                 "refresh": str(refresh),
                 "user": UserSerializer(user).data,
             },
