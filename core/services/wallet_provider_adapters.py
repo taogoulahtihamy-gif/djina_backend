@@ -64,3 +64,84 @@ class MockWalletProviderAdapter(BaseWalletProviderAdapter):
             )
 
         return payload
+
+
+from core.services.wallet_provider_outbound import (
+    BaseWalletProviderOutgoingAdapter,
+    WalletProviderHTTPRequestSpec,
+    WalletProviderTopUpInitiationResult,
+)
+
+
+class MockWalletProviderOutgoingAdapter(
+    BaseWalletProviderOutgoingAdapter
+):
+    """Protocole sortant de test uniquement.
+
+    Il ne représente ni Airtel Money ni Moov Money.
+    """
+
+    def build_topup_request(
+        self,
+        command,
+    ):
+        return WalletProviderHTTPRequestSpec(
+            method="POST",
+            path="topups",
+            headers={
+                "X-DJINA-Idempotency-Key":
+                    command.idempotency_key,
+                "X-DJINA-Correlation-ID":
+                    command.correlation_id,
+            },
+            json_body={
+                "topup_id": command.topup_id,
+                "amount": str(command.amount),
+                "currency": command.currency,
+                "phone": command.phone,
+            },
+        )
+
+    def parse_topup_response(
+        self,
+        *,
+        response,
+        command,
+    ):
+        data = response.data
+
+        if not isinstance(data, dict):
+            raise ValueError(
+                "Mock provider response must be an object."
+            )
+
+        provider_reference = data.get(
+            "provider_reference"
+        )
+        provider_status = data.get(
+            "status"
+        )
+
+        if (
+            not isinstance(provider_reference, str)
+            or not provider_reference.strip()
+        ):
+            raise ValueError(
+                "Missing mock provider reference."
+            )
+
+        if (
+            not isinstance(provider_status, str)
+            or not provider_status.strip()
+        ):
+            raise ValueError(
+                "Missing mock provider status."
+            )
+
+        return WalletProviderTopUpInitiationResult(
+            provider_reference=
+                provider_reference.strip(),
+            provider_status=
+                provider_status.strip(),
+            raw_data=data,
+        )

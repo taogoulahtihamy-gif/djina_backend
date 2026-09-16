@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from django.conf import settings
@@ -35,8 +35,8 @@ class WalletProviderConfig:
     environment: str
     base_url: str
     client_id: str
-    client_secret: str
-    webhook_secret: str
+    client_secret: str = field(repr=False)
+    webhook_secret: str = field(repr=False)
     timeout_seconds: float
 
 
@@ -44,7 +44,7 @@ _PROVIDER_SETTINGS = {
     "mock": {
         "enabled": "WALLET_MOCK_PROVIDER_ENABLED",
         "environment": "WALLET_MOCK_PROVIDER_ENVIRONMENT",
-        "base_url": None,
+        "base_url": "WALLET_MOCK_PROVIDER_BASE_URL",
         "client_id": None,
         "client_secret": None,
         "webhook_secret": "WALLET_MOCK_PROVIDER_SECRET",
