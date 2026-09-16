@@ -59,6 +59,8 @@ class WalletTopUpSerializer(serializers.ModelSerializer):
             "provider",
             "phone",
             "provider_reference",
+            "provider_status",
+            "initiated_at",
             "idempotency_key",
             "status",
             "requested_at",

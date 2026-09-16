@@ -667,6 +667,15 @@ class WalletTopUp(models.Model):
     provider = models.CharField(max_length=20, choices=Provider.choices)
     phone = models.CharField(max_length=20)
     provider_reference = models.CharField(max_length=120, null=True, blank=True)
+    provider_status = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+    )
+    initiated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+    )
     idempotency_key = models.CharField(max_length=120, unique=True)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING, db_index=True)
     requested_at = models.DateTimeField(default=timezone.now)

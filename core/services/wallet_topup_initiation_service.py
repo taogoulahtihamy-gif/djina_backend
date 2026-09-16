@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 
 from core.models import WalletTopUp
 from core.services.wallet_provider_outbound import (
@@ -52,8 +53,6 @@ class WalletTopUpInitiationResult:
 
 
 def _provider_idempotency_key(topup):
-    # Clé serveur stable.
-    # On ne dépend pas d'une nouvelle valeur générée à chaque retry.
     return f"topup:{topup.pk}"
 
 
@@ -76,6 +75,36 @@ def _validate_pending_topup(topup):
         )
 
 
+def _normalize_provider_reference(value):
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value.strip()) > 120
+        or "\r" in value
+        or "\n" in value
+    ):
+        raise WalletTopUpInitiationConsistencyError(
+            "Provider returned an invalid reference."
+        )
+
+    return value.strip()
+
+
+def _normalize_provider_status(value):
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value.strip()) > 50
+        or "\r" in value
+        or "\n" in value
+    ):
+        raise WalletTopUpInitiationConsistencyError(
+            "Provider returned an invalid status."
+        )
+
+    return value.strip()
+
+
 def _existing_result(topup):
     reference = (
         topup.provider_reference or ""
@@ -84,10 +113,15 @@ def _existing_result(topup):
     if not reference:
         return None
 
+    provider_status = (
+        (topup.provider_status or "").strip()
+        or None
+    )
+
     return WalletTopUpInitiationResult(
         topup=topup,
         provider_reference=reference,
-        provider_status=None,
+        provider_status=provider_status,
         initiated=False,
     )
 
@@ -97,14 +131,12 @@ def initiate_wallet_topup(
     topup_id,
     runtime_builder=build_wallet_provider_runtime,
 ):
-    """Initie une demande PENDING auprès du fournisseur.
+    """Initie un top-up PENDING auprès du fournisseur.
 
-    Aucun solde wallet n'est modifié ici.
+    Aucune écriture financière n'a lieu ici.
 
-    Deux appels peuvent atteindre le fournisseur en concurrence.
-    Ils utilisent donc exactement la même clé d'idempotence serveur.
-    Le vrai adaptateur fournisseur devra garantir que cette clé est
-    transmise selon le protocole officiel correspondant.
+    provider_reference, provider_status et initiated_at
+    sont uniquement des métadonnées d'initiation.
     """
 
     if (
@@ -168,20 +200,15 @@ def initiate_wallet_topup(
         ) from exc
 
     provider_reference = (
-        remote_result.provider_reference
+        _normalize_provider_reference(
+            remote_result.provider_reference
+        )
     )
 
-    if (
-        not isinstance(provider_reference, str)
-        or not provider_reference.strip()
-        or len(provider_reference.strip()) > 120
-    ):
-        raise WalletTopUpInitiationConsistencyError(
-            "Provider returned an invalid reference."
+    provider_status = (
+        _normalize_provider_status(
+            remote_result.provider_status
         )
-
-    provider_reference = (
-        provider_reference.strip()
     )
 
     try:
@@ -192,8 +219,8 @@ def initiate_wallet_topup(
                 .get(pk=topup.pk)
             )
 
-            # Un callback peut théoriquement être arrivé pendant
-            # l'appel réseau. On ne réécrit jamais son état terminal.
+            # Le callback peut gagner la course pendant
+            # que l'appel réseau est en vol.
             if locked.status != WalletTopUp.Status.PENDING:
                 if (
                     locked.provider_reference
@@ -203,8 +230,13 @@ def initiate_wallet_topup(
                         topup=locked,
                         provider_reference=
                             provider_reference,
-                        provider_status=
-                            remote_result.provider_status,
+                        provider_status=(
+                            (
+                                locked.provider_status
+                                or ""
+                            ).strip()
+                            or provider_status
+                        ),
                         initiated=False,
                     )
 
@@ -214,6 +246,8 @@ def initiate_wallet_topup(
                     )
                 )
 
+            # Un autre worker peut avoir déjà persisté
+            # le résultat de la même initiation idempotente.
             if locked.provider_reference:
                 if (
                     locked.provider_reference
@@ -223,8 +257,13 @@ def initiate_wallet_topup(
                         topup=locked,
                         provider_reference=
                             provider_reference,
-                        provider_status=
-                            remote_result.provider_status,
+                        provider_status=(
+                            (
+                                locked.provider_status
+                                or ""
+                            ).strip()
+                            or provider_status
+                        ),
                         initiated=False,
                     )
 
@@ -253,10 +292,16 @@ def initiate_wallet_topup(
             locked.provider_reference = (
                 provider_reference
             )
+            locked.provider_status = (
+                provider_status
+            )
+            locked.initiated_at = timezone.now()
 
             locked.save(
                 update_fields=[
                     "provider_reference",
+                    "provider_status",
+                    "initiated_at",
                     "updated_at",
                 ]
             )
@@ -266,7 +311,7 @@ def initiate_wallet_topup(
                 provider_reference=
                     provider_reference,
                 provider_status=
-                    remote_result.provider_status,
+                    provider_status,
                 initiated=True,
             )
 
