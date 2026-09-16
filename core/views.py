@@ -752,28 +752,29 @@ class CourseViewSet(viewsets.ModelViewSet):
     )
     @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated], url_path="cancel")
     def cancel(self, request, pk=None):
-        course = self.get_object()
-        if course.status in (Course.Status.COMPLETED, Course.Status.CANCELLED):
-            return Response({"detail": "Course cannot be cancelled."}, status=400)
-
         payload = CourseCancelSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
         reason = payload.validated_data.get("reason", "")
 
-        if request.user.is_staff:
-            cancelled_by = Course.CancelledBy.ADMIN
-        elif request.user.user_type == User.UserType.CUSTOMER and course.customer.user == request.user:
-            cancelled_by = Course.CancelledBy.CUSTOMER
-        elif request.user.user_type == User.UserType.DRIVER and course.driver and course.driver.user == request.user:
-            cancelled_by = Course.CancelledBy.DRIVER
-        else:
-            return Response({"detail": "Not allowed to cancel this course."}, status=403)
+        from core.services.course_financial_service import (
+            CourseCancellationPermissionError,
+            CourseCancellationReservationError,
+            CourseCancellationStateError,
+            cancel_course_with_reservation_release,
+        )
 
-        course.status = Course.Status.CANCELLED
-        course.cancelled_at = timezone.now()
-        course.cancelled_by = cancelled_by
-        course.cancellation_reason = reason
-        course.save(update_fields=["status", "cancelled_at", "cancelled_by", "cancellation_reason"])
+        try:
+            course, cancelled_by = cancel_course_with_reservation_release(
+                course_id=pk,
+                user=request.user,
+                reason=reason,
+            )
+        except CourseCancellationStateError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        except CourseCancellationPermissionError as exc:
+            return Response({"detail": str(exc)}, status=403)
+        except CourseCancellationReservationError as exc:
+            return Response({"detail": str(exc)}, status=409)
 
         if cancelled_by == Course.CancelledBy.CUSTOMER and course.driver is not None:
             Notification.objects.create(

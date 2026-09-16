@@ -7,8 +7,10 @@ from django.utils import timezone
 from core.models import CommissionReservation, Course, Driver, DriverWallet, Vehicle
 from core.services.commission_service import get_current_commission_setting, quantize_money
 from core.services.wallet_service import (
-    CommissionReservationConflictError, CommissionReservationStateError,
-    WalletNotActiveError, get_or_create_driver_wallet, reserve_commission,
+    CommissionReservationConflictError, CommissionReservationError,
+    CommissionReservationStateError, WalletNotActiveError,
+    WalletTransactionConsistencyError, get_or_create_driver_wallet,
+    release_commission_reservation, reserve_commission,
 )
 
 
@@ -29,6 +31,18 @@ class CourseAcceptanceConfigurationError(CourseFinancialError):
 
 
 class CourseAcceptanceReservationError(CourseFinancialError):
+    pass
+
+
+class CourseCancellationStateError(CourseFinancialError):
+    pass
+
+
+class CourseCancellationPermissionError(CourseFinancialError):
+    pass
+
+
+class CourseCancellationReservationError(CourseFinancialError):
     pass
 
 
@@ -108,3 +122,85 @@ def accept_course_with_commission_reservation(*, course_id, driver, vehicle_id=N
     course.accepted_at = timezone.now()
     course.save(update_fields=["driver", "vehicle", "status", "accepted_at"])
     return course
+
+@transaction.atomic
+def cancel_course_with_reservation_release(*, course_id, user, reason=""):
+    """Annule une course et libère atomiquement sa réservation éventuelle.
+
+    Ordre global :
+    Course -> DriverWallet -> CommissionReservation.
+
+    Les anciennes courses sans réservation restent annulables.
+    """
+    try:
+        course = (
+            Course.objects.select_for_update()
+            .select_related("customer__user", "driver__user")
+            .get(pk=course_id, deleted_at__isnull=True)
+        )
+    except Course.DoesNotExist as exc:
+        raise CourseCancellationStateError(
+            "Course cannot be cancelled."
+        ) from exc
+
+    if course.status in (
+        Course.Status.COMPLETED,
+        Course.Status.CANCELLED,
+    ):
+        raise CourseCancellationStateError(
+            "Course cannot be cancelled."
+        )
+
+    if getattr(user, "is_staff", False):
+        cancelled_by = Course.CancelledBy.ADMIN
+
+    elif (
+        getattr(user, "user_type", None) == "customer"
+        and course.customer.user_id == user.pk
+    ):
+        cancelled_by = Course.CancelledBy.CUSTOMER
+
+    elif (
+        getattr(user, "user_type", None) == "driver"
+        and course.driver_id is not None
+        and course.driver.user_id == user.pk
+    ):
+        cancelled_by = Course.CancelledBy.DRIVER
+
+    else:
+        raise CourseCancellationPermissionError(
+            "Not allowed to cancel this course."
+        )
+
+    reservation = CommissionReservation.objects.filter(
+        course_id=course.pk
+    ).first()
+
+    if reservation is not None:
+        try:
+            release_commission_reservation(
+                reservation=reservation
+            )
+        except (
+            CommissionReservationError,
+            WalletTransactionConsistencyError,
+        ) as exc:
+            raise CourseCancellationReservationError(
+                "Commission reservation cannot be released."
+            ) from exc
+
+    course.status = Course.Status.CANCELLED
+    course.cancelled_at = timezone.now()
+    course.cancelled_by = cancelled_by
+    course.cancellation_reason = reason or ""
+
+    course.save(
+        update_fields=[
+            "status",
+            "cancelled_at",
+            "cancelled_by",
+            "cancellation_reason",
+        ]
+    )
+
+    return course, cancelled_by
