@@ -1,4 +1,3 @@
-from django.conf import settings
 from django.http import Http404
 
 from rest_framework import serializers, status
@@ -9,8 +8,12 @@ from rest_framework.views import APIView
 from core.models import WalletTopUp
 from core.serializers_wallet import WalletTopUpSerializer
 from core.services.wallet_provider_adapters import (
-    MockWalletProviderAdapter,
     WalletProviderPayloadError,
+)
+from core.services.wallet_provider_registry import (
+    WalletProviderConfigurationError,
+    WalletProviderDisabledError,
+    build_wallet_provider_adapter,
 )
 from core.services.wallet_provider_service import (
     WalletProviderSignatureError,
@@ -101,24 +104,22 @@ class MockWalletTopUpWebhookView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        if not getattr(
-            settings,
-            "WALLET_MOCK_PROVIDER_ENABLED",
-            False,
-        ):
+        try:
+            adapter = build_wallet_provider_adapter(
+                "mock"
+            )
+        except WalletProviderDisabledError:
             raise Http404
-
-        secret = getattr(
-            settings,
-            "WALLET_MOCK_PROVIDER_SECRET",
-            "",
-        )
+        except WalletProviderConfigurationError:
+            return Response(
+                {
+                    "detail":
+                        "Wallet provider is misconfigured."
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         raw_body = request.body
-
-        adapter = MockWalletProviderAdapter(
-            secret=secret
-        )
 
         try:
             payload = adapter.verify_and_parse(

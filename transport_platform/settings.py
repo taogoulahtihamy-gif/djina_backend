@@ -469,3 +469,82 @@ TWILIO_AUTH_TOKEN = (
         "",
     )
 )
+
+# ===== DJINA WALLET PROVIDERS =====
+# Aucun secret fournisseur ne doit être versionné.
+# Les intégrations réelles restent désactivées par défaut.
+
+WALLET_MOCK_PROVIDER_ENABLED = os.environ.get(
+    "WALLET_MOCK_PROVIDER_ENABLED",
+    "false",
+)
+WALLET_MOCK_PROVIDER_SECRET = os.environ.get(
+    "WALLET_MOCK_PROVIDER_SECRET",
+    "",
+)
+WALLET_MOCK_PROVIDER_ENVIRONMENT = os.environ.get(
+    "WALLET_MOCK_PROVIDER_ENVIRONMENT",
+    "mock",
+)
+WALLET_MOCK_PROVIDER_TIMEOUT_SECONDS = os.environ.get(
+    "WALLET_MOCK_PROVIDER_TIMEOUT_SECONDS",
+    "10",
+)
+
+WALLET_AIRTEL_ENABLED = os.environ.get(
+    "WALLET_AIRTEL_ENABLED",
+    "false",
+)
+WALLET_AIRTEL_ENVIRONMENT = os.environ.get(
+    "WALLET_AIRTEL_ENVIRONMENT",
+    "sandbox",
+)
+WALLET_AIRTEL_BASE_URL = os.environ.get(
+    "WALLET_AIRTEL_BASE_URL",
+    "",
+)
+WALLET_AIRTEL_CLIENT_ID = os.environ.get(
+    "WALLET_AIRTEL_CLIENT_ID",
+    "",
+)
+WALLET_AIRTEL_CLIENT_SECRET = os.environ.get(
+    "WALLET_AIRTEL_CLIENT_SECRET",
+    "",
+)
+WALLET_AIRTEL_WEBHOOK_SECRET = os.environ.get(
+    "WALLET_AIRTEL_WEBHOOK_SECRET",
+    "",
+)
+WALLET_AIRTEL_TIMEOUT_SECONDS = os.environ.get(
+    "WALLET_AIRTEL_TIMEOUT_SECONDS",
+    "10",
+)
+
+WALLET_MOOV_ENABLED = os.environ.get(
+    "WALLET_MOOV_ENABLED",
+    "false",
+)
+WALLET_MOOV_ENVIRONMENT = os.environ.get(
+    "WALLET_MOOV_ENVIRONMENT",
+    "sandbox",
+)
+WALLET_MOOV_BASE_URL = os.environ.get(
+    "WALLET_MOOV_BASE_URL",
+    "",
+)
+WALLET_MOOV_CLIENT_ID = os.environ.get(
+    "WALLET_MOOV_CLIENT_ID",
+    "",
+)
+WALLET_MOOV_CLIENT_SECRET = os.environ.get(
+    "WALLET_MOOV_CLIENT_SECRET",
+    "",
+)
+WALLET_MOOV_WEBHOOK_SECRET = os.environ.get(
+    "WALLET_MOOV_WEBHOOK_SECRET",
+    "",
+)
+WALLET_MOOV_TIMEOUT_SECONDS = os.environ.get(
+    "WALLET_MOOV_TIMEOUT_SECONDS",
+    "10",
+)
