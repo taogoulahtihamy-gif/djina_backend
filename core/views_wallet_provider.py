@@ -1,5 +1,3 @@
-import json
-
 from django.conf import settings
 from django.http import Http404
 
@@ -10,9 +8,12 @@ from rest_framework.views import APIView
 
 from core.models import WalletTopUp
 from core.serializers_wallet import WalletTopUpSerializer
+from core.services.wallet_provider_adapters import (
+    MockWalletProviderAdapter,
+    WalletProviderPayloadError,
+)
 from core.services.wallet_provider_service import (
     WalletProviderSignatureError,
-    verify_mock_provider_signature,
 )
 from core.services.wallet_service import (
     WalletError,
@@ -114,31 +115,23 @@ class MockWalletTopUpWebhookView(APIView):
 
         raw_body = request.body
 
+        adapter = MockWalletProviderAdapter(
+            secret=secret
+        )
+
         try:
-            verify_mock_provider_signature(
+            payload = adapter.verify_and_parse(
                 raw_body=raw_body,
-                signature=request.headers.get(
-                    "X-DJINA-Signature",
-                    "",
-                ),
-                secret=secret,
+                headers=request.headers,
             )
         except WalletProviderSignatureError as exc:
             return Response(
                 {"detail": str(exc)},
                 status=status.HTTP_403_FORBIDDEN,
             )
-
-        try:
-            payload = json.loads(
-                raw_body.decode("utf-8")
-            )
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-        ):
+        except WalletProviderPayloadError as exc:
             return Response(
-                {"detail": "Invalid JSON payload."},
+                {"detail": str(exc)},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
