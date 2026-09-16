@@ -19,12 +19,13 @@ from core.services.wallet_service import (
     WalletError,
     WalletNotActiveError,
 )
+from core.services.wallet_provider_callback_service import (
+    process_wallet_provider_callback,
+)
 from core.services.wallet_topup_service import (
     WalletTopUpConflictError,
     WalletTopUpError,
     WalletTopUpStateError,
-    confirm_wallet_topup,
-    fail_wallet_topup,
 )
 
 
@@ -145,39 +146,28 @@ class MockWalletTopUpWebhookView(APIView):
         data = serializer.validated_data
 
         try:
-            if (
-                data["status"]
-                == WalletTopUp.Status.SUCCESS
-            ):
-                topup, wallet_transaction, processed = (
-                    confirm_wallet_topup(
-                        topup_id=data["topup_id"],
-                        provider=data["provider"],
-                        provider_reference=data[
-                            "provider_reference"
-                        ],
-                        confirmed_amount=data["amount"],
-                    )
-                )
+            result = process_wallet_provider_callback(
+                topup_id=data["topup_id"],
+                provider=data["provider"],
+                provider_reference=data[
+                    "provider_reference"
+                ],
+                amount=data["amount"],
+                callback_status=data["status"],
+                failure_reason=data.get(
+                    "failure_reason"
+                ),
+            )
 
-                transaction_id = (
-                    wallet_transaction.pk
-                )
+            topup = result.topup
+            processed = result.processed
 
-            else:
-                topup, processed = fail_wallet_topup(
-                    topup_id=data["topup_id"],
-                    provider=data["provider"],
-                    provider_reference=data[
-                        "provider_reference"
-                    ],
-                    amount=data["amount"],
-                    failure_reason=data[
-                        "failure_reason"
-                    ],
-                )
-
-                transaction_id = None
+            transaction_id = (
+                result.wallet_transaction.pk
+                if result.wallet_transaction
+                is not None
+                else None
+            )
 
         except (
             WalletTopUpConflictError,
