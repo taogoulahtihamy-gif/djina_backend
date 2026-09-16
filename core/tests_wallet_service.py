@@ -888,3 +888,46 @@ class CommissionReservationServiceTests(TestCase):
         self.assertEqual(retry.pk, first.pk)
         self.assertEqual(calls, 2)
         self.assertEqual(self.snapshot(), before)
+
+    def test_reserve_bool_rejected(self):
+        for value in (True, False):
+            self.assert_rejected(self.reserve, InvalidWalletAmountError, estimated_amount=value)
+
+    def test_reserve_normalized_retry(self):
+        first = self.reserve(estimated_amount=150)
+        before = self.snapshot()
+        for value in ("150.00", Decimal("150.0")):
+            self.assertEqual(self.reserve(estimated_amount=value).pk, first.pk)
+            self.assertEqual(self.snapshot(), before)
+
+    def test_reserve_missing_wallet_rejected(self):
+        self.assert_rejected(self.reserve, DriverWallet.DoesNotExist, wallet=DriverWallet())
+
+    def test_finish_deleted_reservation_rejected(self):
+        result = self.reserve()
+        release_commission_reservation(reservation=result)
+        CommissionReservation.objects.filter(pk=result.pk).delete()
+        for operation in (release_commission_reservation, consume_commission_reservation):
+            self.assert_rejected(operation, CommissionReservationError, reservation=result)
+
+    def test_finish_does_not_modify_course(self):
+        for operation in (release_commission_reservation, consume_commission_reservation):
+            course = self.make_course(None)
+            before = Course.objects.filter(pk=course.pk).values().get()
+            operation(reservation=self.reserve(course=course))
+            self.assertEqual(Course.objects.filter(pk=course.pk).values().get(), before)
+
+    def test_unrelated_integrity_error_with_existing_reservation_propagates(self):
+        self.reserve()
+        real_lock = CommissionReservation.objects.select_for_update
+        calls = 0
+
+        def miss_first_lookup(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return CommissionReservation.objects.none() if calls == 1 else real_lock(*args, **kwargs)
+
+        with patch.object(CommissionReservation.objects, "select_for_update", side_effect=miss_first_lookup), \
+                patch.object(CommissionReservation.objects, "create", side_effect=IntegrityError("unrelated")):
+            self.assert_rejected(self.reserve, IntegrityError)
+        self.assertEqual(calls, 1)

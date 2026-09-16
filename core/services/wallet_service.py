@@ -10,7 +10,7 @@ Les verrous de lignes nécessitent une base qui supporte select_for_update
 
 from decimal import Decimal, InvalidOperation, localcontext
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
 from core.models import CommissionReservation, Course, Driver, DriverWallet, WalletTransaction
@@ -228,6 +228,29 @@ def _existing_reservation(existing, *, wallet_id, driver_id, estimated_amount):
     return existing
 
 
+def _is_course_reservation_collision(error):
+    """Reconnaît uniquement la contrainte unique du OneToOne course."""
+    cause = error.__cause__
+    table = CommissionReservation._meta.db_table
+    column = CommissionReservation._meta.get_field("course").column
+    if connection.vendor == "sqlite":
+        return (
+            getattr(cause, "sqlite_errorname", None) == "SQLITE_CONSTRAINT_UNIQUE"
+            and str(cause) == f"UNIQUE constraint failed: {table}.{column}"
+        )
+    if connection.vendor == "postgresql":
+        if getattr(cause, "sqlstate", getattr(cause, "pgcode", None)) != "23505":
+            return False
+        diagnostic = getattr(cause, "diag", None)
+        if getattr(diagnostic, "table_name", None) != table:
+            return False
+        with connection.cursor() as cursor:
+            constraints = connection.introspection.get_constraints(cursor, table)
+        constraint = constraints.get(getattr(diagnostic, "constraint_name", None), {})
+        return constraint.get("unique", False) and constraint.get("columns") == [column]
+    return False
+
+
 def reserve_commission(*, wallet, driver, course, estimated_amount):
     """Réserve une fois par course, sans débit ni écriture WalletTransaction.
 
@@ -267,7 +290,9 @@ def reserve_commission(*, wallet, driver, course, estimated_amount):
             return CommissionReservation.objects.create(
                 **identity, course_id=course.pk, status=CommissionReservation.Status.ACTIVE,
             )
-    except IntegrityError:
+    except IntegrityError as exc:
+        if not _is_course_reservation_collision(exc):
+            raise
         # L'augmentation perdante est déjà rollbackée. Reprendre les verrous
         # dans le même ordre avant de relire le gagnant, sans absorber une
         # erreur d'intégrité sans réservation correspondante.
