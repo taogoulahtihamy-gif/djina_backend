@@ -4,18 +4,26 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from core.models import Driver, WalletTransaction
-from core.views import IsDriverUser
+from core.models import Driver, WalletTopUp, WalletTransaction
 from core.serializers_wallet import (
     DriverWalletSerializer,
+    WalletTopUpCreateSerializer,
+    WalletTopUpSerializer,
     WalletTransactionSerializer,
 )
-from core.services.wallet_service import get_or_create_driver_wallet
+from core.services.wallet_service import (
+    WalletError,
+    WalletNotActiveError,
+    get_or_create_driver_wallet,
+)
+from core.services.wallet_topup_service import (
+    WalletTopUpConflictError,
+    request_wallet_topup,
+)
+from core.views import IsDriverUser
 
 
 class DriverWalletViewSet(viewsets.GenericViewSet):
-    """API en lecture du portefeuille du chauffeur authentifié."""
-
     permission_classes = [IsDriverUser]
     serializer_class = DriverWalletSerializer
 
@@ -34,14 +42,11 @@ class DriverWalletViewSet(viewsets.GenericViewSet):
     def list(self, request):
         wallet = self._wallet()
 
-        serializer = DriverWalletSerializer(
-            wallet,
-            context=self.get_serializer_context(),
-        )
-
         return Response(
-            serializer.data,
-            status=status.HTTP_200_OK,
+            DriverWalletSerializer(
+                wallet,
+                context=self.get_serializer_context(),
+            ).data
         )
 
     @action(
@@ -65,19 +70,82 @@ class DriverWalletViewSet(viewsets.GenericViewSet):
             serializer = WalletTransactionSerializer(
                 page,
                 many=True,
-                context=self.get_serializer_context(),
             )
             return self.get_paginated_response(
                 serializer.data
             )
 
-        serializer = WalletTransactionSerializer(
-            queryset,
-            many=True,
-            context=self.get_serializer_context(),
+        return Response(
+            WalletTransactionSerializer(
+                queryset,
+                many=True,
+            ).data
         )
 
+    @action(
+        detail=False,
+        methods=["get", "post"],
+        url_path="topups",
+    )
+    def topups(self, request):
+        wallet = self._wallet()
+
+        if request.method == "GET":
+            queryset = (
+                WalletTopUp.objects
+                .filter(wallet=wallet)
+                .order_by("-requested_at", "-pk")
+            )
+
+            page = self.paginate_queryset(queryset)
+
+            if page is not None:
+                serializer = WalletTopUpSerializer(
+                    page,
+                    many=True,
+                )
+                return self.get_paginated_response(
+                    serializer.data
+                )
+
+            return Response(
+                WalletTopUpSerializer(
+                    queryset,
+                    many=True,
+                ).data
+            )
+
+        payload = WalletTopUpCreateSerializer(
+            data=request.data
+        )
+        payload.is_valid(raise_exception=True)
+
+        try:
+            topup, created = request_wallet_topup(
+                wallet=wallet,
+                **payload.validated_data,
+            )
+        except WalletTopUpConflictError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except WalletNotActiveError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except WalletError as exc:
+            return Response(
+                {"detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         return Response(
-            serializer.data,
-            status=status.HTTP_200_OK,
+            WalletTopUpSerializer(topup).data,
+            status=(
+                status.HTTP_201_CREATED
+                if created
+                else status.HTTP_200_OK
+            ),
         )

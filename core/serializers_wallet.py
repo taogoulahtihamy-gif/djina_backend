@@ -1,6 +1,10 @@
 from rest_framework import serializers
 
-from core.models import DriverWallet, WalletTransaction
+from core.models import (
+    DriverWallet,
+    WalletTopUp,
+    WalletTransaction,
+)
 
 
 class DriverWalletSerializer(serializers.ModelSerializer):
@@ -43,3 +47,45 @@ class WalletTransactionSerializer(serializers.ModelSerializer):
             "created_at",
         )
         read_only_fields = fields
+
+
+class WalletTopUpSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WalletTopUp
+        fields = (
+            "id",
+            "amount",
+            "currency",
+            "provider",
+            "phone",
+            "provider_reference",
+            "idempotency_key",
+            "status",
+            "requested_at",
+            "confirmed_at",
+            "failure_reason",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+class WalletTopUpCreateSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+    )
+
+    provider = serializers.ChoiceField(
+        choices=WalletTopUp.Provider.choices,
+    )
+
+    phone = serializers.CharField(
+        max_length=20,
+        trim_whitespace=True,
+    )
+
+    idempotency_key = serializers.CharField(
+        max_length=120,
+        trim_whitespace=True,
+    )
